@@ -45,6 +45,10 @@ STATION_BLAKER = "2.17.0"  # Blaker (Glomma)
 STATION_ERTESEKKEN = "2.16.0"  # Ertesekken
 STATION_FUNNEFOSS_DISCHARGE = "2.279.0"  # Funnefoss nedre (discharge)
 
+# Temperature monitoring stations
+STATION_SVANEFOSS = "2.52.0"  # Svanefoss (Vorma)
+STATION_FETSUND = "2.587.0"  # Fetsund bru (finish line)
+
 # Weather location (Mjøsa)
 MJOSA_LAT = 60.403489
 MJOSA_LON = 11.230855
@@ -302,7 +306,7 @@ def assess_risk_level(prediction, weather_forecast):
     
     # Risk assessment
     if predicted_temp < 14 or anomaly < -3:
-        return "HØYRISIKOGROUP", "#dc3545"  # Red
+        return "HØYRISIKOGRUPPE", "#dc3545"  # Red
     elif predicted_temp < 16 or anomaly < -2 or southerly_risk:
         return "MODERAT RISIKO", "#ffc107"  # Yellow
     elif predicted_temp < 18:
@@ -382,34 +386,35 @@ def create_discharge_chart(funnefoss_df, ertesekken_df, blaker_df):
     
     return fig
 
-def create_temperature_chart(vorma_df, fetsund_df=None):
-    """Create interactive temperature chart"""
+def create_temperature_chart(svanefoss_df=None, blaker_df=None, fetsund_df=None):
+    """Create interactive temperature chart with multiple stations"""
     fig = go.Figure()
     
-    if not vorma_df.empty:
-        # Handle both 'value' and 'temperature' column names
-        temp_col = 'temperature' if 'temperature' in vorma_df.columns else 'value'
-        
-        fig.add_trace(go.Scatter(
-            x=vorma_df['time'],
-            y=vorma_df[temp_col],
-            mode='lines+markers',
-            name='Vorma (Funnefoss)',
-            line=dict(color='#2E86AB', width=2),
-            marker=dict(size=4)
-        ))
+    colors = {
+        'Svanefoss': '#2E86AB',
+        'Blaker': '#06A77D',
+        'Fetsund': '#A23B72'
+    }
     
-    if fetsund_df is not None and not fetsund_df.empty:
-        temp_col = 'temperature' if 'temperature' in fetsund_df.columns else 'value'
-        
-        fig.add_trace(go.Scatter(
-            x=fetsund_df['time'],
-            y=fetsund_df[temp_col],
-            mode='lines+markers',
-            name='Fetsund (målt)',
-            line=dict(color='#A23B72', width=2),
-            marker=dict(size=4)
-        ))
+    stations = [
+        ('Svanefoss', svanefoss_df),
+        ('Blaker', blaker_df),
+        ('Fetsund', fetsund_df)
+    ]
+    
+    for name, df in stations:
+        if df is not None and not df.empty:
+            # Handle both 'value' and 'temperature' column names
+            temp_col = 'temperature' if 'temperature' in df.columns else 'value'
+            
+            fig.add_trace(go.Scatter(
+                x=df['time'],
+                y=df[temp_col],
+                mode='lines+markers',
+                name=name,
+                line=dict(color=colors[name], width=2),
+                marker=dict(size=4)
+            ))
     
     fig.update_layout(
         title="Vanntemperatur - Siste 72 timer",
@@ -417,7 +422,15 @@ def create_temperature_chart(vorma_df, fetsund_df=None):
         yaxis_title="Temperatur (°C)",
         hovermode='x unified',
         height=400,
-        template='plotly_white'
+        template='plotly_white',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10)
+        )
     )
     
     return fig
@@ -427,25 +440,28 @@ def create_weather_forecast_table(weather_df, days=7):
     if weather_df.empty:
         return None
     
-    # Group by day and calculate daily summaries
-    weather_df = weather_df.copy()
-    weather_df['date'] = pd.to_datetime(weather_df['time']).dt.date
-    
-    daily_summary = []
-    for date in weather_df['date'].unique()[:days]:
-        day_data = weather_df[weather_df['date'] == date]
+    try:
+        # Group by day and calculate daily summaries
+        weather_df = weather_df.copy()
+        weather_df['date'] = pd.to_datetime(weather_df['time']).dt.date
         
-        summary = {
-            'Dato': pd.to_datetime(date).strftime('%a %d.%m'),
-            'Min temp': f"{day_data['air_temperature'].min():.1f}°C",
-            'Max temp': f"{day_data['air_temperature'].max():.1f}°C",
-            'Gj.snitt vind': f"{day_data['wind_speed'].mean():.1f} m/s",
-            'Maks vind': f"{day_data['wind_speed'].max():.1f} m/s",
-            'Vindretning': f"{day_data['wind_direction'].mean():.0f}°"
-        }
-        daily_summary.append(summary)
-    
-    return pd.DataFrame(daily_summary)
+        daily_summary = []
+        for date in weather_df['date'].unique()[:days]:
+            day_data = weather_df[weather_df['date'] == date]
+            
+            summary = {
+                'Dato': pd.to_datetime(date).strftime('%a %d.%m'),
+                'Min temp': f"{day_data['air_temperature'].min():.1f}°C",
+                'Max temp': f"{day_data['air_temperature'].max():.1f}°C",
+                'Gj.snitt vind': f"{day_data['wind_speed'].mean():.1f} m/s",
+                'Maks vind': f"{day_data['wind_speed'].max():.1f} m/s",
+                'Vindretning': f"{day_data['wind_direction'].mean():.0f}°"
+            }
+            daily_summary.append(summary)
+        
+        return pd.DataFrame(daily_summary)
+    except Exception as e:
+        return None
 
 def create_wind_chart(weather_df):
     """Create wind speed and direction chart"""
@@ -574,8 +590,11 @@ def main():
     
     # Fetch data
     with st.spinner("Laster data..."):
-        # NVE data - temperature
+        # NVE data - temperature from multiple stations
         vorma_temp = fetch_nve_data(STATION_VORMA, 1003, hours_back=72)
+        svanefoss_temp = fetch_nve_data(STATION_SVANEFOSS, 1003, hours_back=72)
+        blaker_temp = fetch_nve_data(STATION_BLAKER, 1003, hours_back=72)
+        fetsund_temp = fetch_nve_data(STATION_FETSUND, 1003, hours_back=72)
         
         # NVE data - discharge/vannføring
         funnefoss_discharge = fetch_nve_data(STATION_FUNNEFOSS_DISCHARGE, 1001, hours_back=72)
@@ -789,12 +808,12 @@ def main():
     elif prediction:
         risk_level, risk_color = assess_risk_level(prediction, weather_forecast)
         
-        # Big prediction display
+        # Prediction display (reduced size)
         st.markdown(f"""
-        <div style='background-color: {risk_color}; padding: 20px; border-radius: 10px; color: white; text-align: center;'>
-            <h2 style='margin: 0; color: white;'>Predikert temperatur ved Fetsund</h2>
-            <h1 style='margin: 10px 0; font-size: 3em; color: white;'>{prediction['predicted_temp']:.1f}°C</h1>
-            <h3 style='margin: 0; color: white;'>{risk_level}</h3>
+        <div style='background-color: {risk_color}; padding: 15px; border-radius: 10px; color: white; text-align: center;'>
+            <h3 style='margin: 0; color: white; font-size: 1.2em;'>Predikert temperatur ved Fetsund</h3>
+            <h1 style='margin: 10px 0; font-size: 2.5em; color: white;'>{prediction['predicted_temp']:.1f}°C</h1>
+            <h4 style='margin: 0; color: white; font-size: 1em;'>{risk_level}</h4>
         </div>
         """, unsafe_allow_html=True)
         
@@ -825,7 +844,7 @@ def main():
                 help="Basert på datakvalitet og aktualitet"
             )
         
-        # Confidence interval
+        # Confidence interval and disclaimer
         std_error = 2.0  # Standard error from model validation
         margin = std_error * 1.96  # 95% confidence
         
@@ -837,6 +856,11 @@ def main():
         - 📉 14% overlevelsesrate av temperaturendringer (grunnet fortynning)
         - 📊 Historiske data fra {len(vorma_temp)} målinger
         """)
+        
+        st.warning("""
+        ⚠️ **Viktig:** Modellen er trent på data fra juli og august og vil ikke være like nøyaktig for andre måneder. 
+        Bruk med forsiktighet utenfor sommermånedene.
+        """)
     else:
         st.warning("⚠️ Ikke nok data for å beregne prediksjon for arrangementsdatoen.")
     
@@ -844,7 +868,11 @@ def main():
     
     # Temperature chart
     st.subheader("📈 Temperaturhistorikk")
-    temp_chart = create_temperature_chart(vorma_temp)
+    temp_chart = create_temperature_chart(
+        svanefoss_df=svanefoss_temp,
+        blaker_df=blaker_temp,
+        fetsund_df=fetsund_temp
+    )
     st.plotly_chart(temp_chart, use_container_width=True)
     
     # Discharge/Vannføring section
