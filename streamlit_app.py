@@ -73,12 +73,11 @@ def fetch_nve_data(station_id, parameter, hours_back=72):
             "accept": "application/json"
         }
         
-        end_time = datetime.now()
+        # Try without ReferenceTime first (gets most recent data)
         params = {
             "StationId": station_id,
             "Parameter": str(parameter),
-            "ResolutionTime": "60",
-            "ReferenceTime": end_time.strftime("%Y-%m-%dT%H:%M:%S")
+            "ResolutionTime": "60"
         }
         
         response = requests.get(url, headers=headers, params=params, timeout=30)
@@ -90,7 +89,8 @@ def fetch_nve_data(station_id, parameter, hours_back=72):
             df = pd.DataFrame(observations)
             df['time'] = pd.to_datetime(df['time'])
             
-            cutoff_time = end_time - timedelta(hours=hours_back)
+            end_time = pd.Timestamp.now(tz='UTC')
+            cutoff_time = end_time - pd.Timedelta(hours=hours_back)
             df = df[df['time'] >= cutoff_time]
             df = df[df['quality'].isin([1, 2])]  # Quality controlled data only
             df = df.sort_values('time').reset_index(drop=True)
@@ -99,8 +99,15 @@ def fetch_nve_data(station_id, parameter, hours_back=72):
         else:
             return pd.DataFrame(columns=['time', 'value', 'quality'])
             
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 400:
+            # Station might not have current data (winter shutdown)
+            return pd.DataFrame(columns=['time', 'value', 'quality'])
+        else:
+            st.warning(f"NVE API error: {e.response.status_code}")
+            return pd.DataFrame(columns=['time', 'value', 'quality'])
     except Exception as e:
-        st.error(f"Error fetching NVE data: {e}")
+        st.warning(f"Could not fetch data: {str(e)[:100]}")
         return pd.DataFrame(columns=['time', 'value', 'quality'])
 
 @st.cache_data(ttl=21600)  # Cache for 6 hours
@@ -438,13 +445,20 @@ def main():
     days_until = (event_date - datetime.now()).days
     
     # Event info banner
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Neste arrangement", event_date.strftime("%d. %B %Y"))
     with col2:
         st.metric("Dager igjen", f"{days_until} dager")
     with col3:
         st.metric("Starttid", "10:00")
+    with col4:
+        # Station status indicator
+        current_month = datetime.now().month
+        if 4 <= current_month <= 9:  # April-September
+            st.metric("Stasjon", "🟢 Aktiv")
+        else:  # October-March
+            st.metric("Stasjon", "🔴 Offline (vinter)")
     
     st.divider()
     
@@ -460,8 +474,75 @@ def main():
     
     # Check data availability
     if vorma_temp.empty:
-        st.warning("⚠️ Kunne ikke hente temperaturdata fra Vorma. Prøv igjen senere.")
+        st.warning("""
+        ⚠️ **Målestasjon offline (vintersesong)**
+        
+        Vorma temperaturstasjon (Funnefoss) er for øyeblikket offline. Dette er normalt for vintersesongen 
+        (november-mars) når målingene er stengt ned for å unngå isskader.
+        
+        **Stasjonen vil starte opp igjen i april 2026** - i god tid før Glommadyppen!
+        
+        For nå kan du:
+        - Se værvarsel for Mjøsa (oppdateres kontinuerlig)
+        - Utforske historiske data og mønstre
+        - Teste systemet med demo-data
+        """)
+        
+        # Show weather forecast anyway
+        if not weather_forecast.empty:
+            st.subheader("💨 Værvarsel (Mjøsa)")
+            st.info("Værvarsling er aktiv! Vinddata oppdateres hver 6. time.")
+            
+            weather_forecast = calculate_southerly_wind(weather_forecast)
+            
+            # Wind statistics
+            next_48h = weather_forecast.head(48)
+            avg_wind = next_48h['wind_speed'].mean()
+            max_wind = next_48h['wind_speed'].max()
+            avg_southerly = next_48h['southerly_wind'].mean()
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Gj.snitt vind (48t)", f"{avg_wind:.1f} m/s")
+            with col2:
+                st.metric("Maks vind (48t)", f"{max_wind:.1f} m/s")
+            with col3:
+                if avg_southerly >= 1.5:
+                    st.metric(
+                        "Sørlig vind (48t)",
+                        f"{avg_southerly:.1f} m/s",
+                        delta="⚠️ Ville utløst oppdrift!",
+                        delta_color="inverse"
+                    )
+                else:
+                    st.metric("Sørlig vind (48t)", f"{avg_southerly:.1f} m/s")
+            
+            wind_chart = create_wind_chart(weather_forecast.head(168))
+            if wind_chart:
+                st.plotly_chart(wind_chart, use_container_width=True)
+        
+        # Historical context
+        st.subheader("📚 Historisk kontekst")
+        st.markdown("""
+        ### Hvordan systemet fungerer
+        
+        Når stasjonen er aktiv (april-september), vil appen:
+        1. **Hente sanntidsdata** fra Vorma hvert time
+        2. **Analysere værforhold** over Mjøsa kontinuerlig
+        3. **Beregne prediksjon** for Fetsund (25 timer frem i tid)
+        4. **Varsle om kalde hendelser** når sørlig vind utløser oppdrift
+        
+        ### Viktige datoer
+        - **April 2026:** Målestasjon starter opp igjen
+        - **1. august 2026:** Glommadyppen (første lørdag i august)
+        - **Juli 2026:** Full operativ overvåking starter
+        
+        ### Kom tilbake i april 2026!
+        Da vil hele systemet være aktivt med sanntidsmålinger og prognoser.
+        """)
+        
         st.stop()
+    
     
     # Rename value column
     vorma_temp = vorma_temp.rename(columns={'value': 'temperature'})
