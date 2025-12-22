@@ -511,7 +511,7 @@ def create_wind_chart(weather_df):
     )
     
     # Add vertical line showing "now" (forecast only - no historical data available)
-    current_time = pd.Timestamp.now(tz='UTC')
+    current_time = pd.Timestamp.now(tz='UTC').to_pydatetime()
     fig.add_vline(
         x=current_time,
         line_dash="dash",
