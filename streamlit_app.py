@@ -31,7 +31,12 @@ st.set_page_config(
 # ============================================================================
 
 # NVE API Configuration
-NVE_API_KEY = st.secrets.get("nve_api_key", "MnP2X95LeUexxxYDRY52MA==")
+# Try to get from secrets, if not available use placeholder
+try:
+    NVE_API_KEY = st.secrets["nve_api_key"]
+except (KeyError, FileNotFoundError):
+    NVE_API_KEY = None
+    
 NVE_BASE_URL = "https://hydapi.nve.no/api/v1"
 
 # Station IDs
@@ -111,7 +116,7 @@ def fetch_weather_forecast(lat, lon, days_ahead=7):
         data = response.json()
         
         forecast_list = []
-        max_time = datetime.now() + timedelta(days=days_ahead)
+        max_time = pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=days_ahead)
         
         for ts in data['properties']['timeseries']:
             time = pd.to_datetime(ts['time'])
@@ -228,7 +233,12 @@ def calculate_confidence(df, target_time):
         return 0.0
     
     # Time since last observation
-    latest_time = df['time'].max()
+    latest_time = pd.to_datetime(df['time'].max())
+    if latest_time.tz is None:
+        latest_time = latest_time.tz_localize('UTC')
+    if target_time.tz is None:
+        target_time = target_time.tz_localize('UTC')
+    
     hours_old = (target_time - latest_time).total_seconds() / 3600
     
     # Confidence decreases with data age
@@ -461,7 +471,10 @@ def main():
     
     # Current status
     latest_vorma = vorma_temp.iloc[-1]
-    data_age_hours = (datetime.now() - latest_vorma['time']).total_seconds() / 3600
+    latest_time = pd.to_datetime(latest_vorma['time'])
+    if latest_time.tz is None:
+        latest_time = latest_time.tz_localize('UTC')
+    data_age_hours = (pd.Timestamp.now(tz='UTC') - latest_time).total_seconds() / 3600
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -654,7 +667,7 @@ def main():
         - **Met.no:** Værvarsling
         
         ### Sist oppdatert
-        {datetime.now().strftime("%d.%m.%Y %H:%M")}
+        {pd.Timestamp.now(tz='Europe/Oslo').strftime("%d.%m.%Y %H:%M")} (Oslo tid)
         """)
         
         st.markdown("---")
