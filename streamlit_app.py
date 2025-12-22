@@ -46,6 +46,7 @@ STATION_ERTESEKKEN = "2.16.0"  # Ertesekken
 STATION_FUNNEFOSS_DISCHARGE = "2.279.0"  # Funnefoss nedre (discharge)
 
 # Temperature monitoring stations
+STATION_FUNNEFOSS = "2.410.0"  # Funnefoss overvann (Vorma)
 STATION_SVANEFOSS = "2.52.0"  # Svanefoss (Vorma)
 STATION_FETSUND = "2.587.0"  # Fetsund bru (finish line)
 
@@ -368,7 +369,7 @@ def create_discharge_chart(funnefoss_df, ertesekken_df, blaker_df):
         ))
     
     fig.update_layout(
-        title="Vannføring - Siste 72 timer",
+        title="Vannføring - Siste 7 dager",
         xaxis_title="Tid",
         yaxis_title="Vannføring (m³/s)",
         hovermode='x unified',
@@ -386,18 +387,18 @@ def create_discharge_chart(funnefoss_df, ertesekken_df, blaker_df):
     
     return fig
 
-def create_temperature_chart(svanefoss_df=None, blaker_df=None, fetsund_df=None):
+def create_temperature_chart(funnefoss_df=None, blaker_df=None, fetsund_df=None):
     """Create interactive temperature chart with multiple stations"""
     fig = go.Figure()
     
     colors = {
-        'Svanefoss': '#2E86AB',
+        'Funnefoss': '#2E86AB',
         'Blaker': '#06A77D',
         'Fetsund': '#A23B72'
     }
     
     stations = [
-        ('Svanefoss', svanefoss_df),
+        ('Funnefoss', funnefoss_df),
         ('Blaker', blaker_df),
         ('Fetsund', fetsund_df)
     ]
@@ -417,7 +418,7 @@ def create_temperature_chart(svanefoss_df=None, blaker_df=None, fetsund_df=None)
             ))
     
     fig.update_layout(
-        title="Vanntemperatur - Siste 72 timer",
+        title="Vanntemperatur - Siste 7 dager",
         xaxis_title="Tid",
         yaxis_title="Temperatur (°C)",
         hovermode='x unified',
@@ -509,6 +510,16 @@ def create_wind_chart(weather_df):
         row=1, col=1
     )
     
+    # Add vertical line showing "now" (forecast only - no historical data available)
+    current_time = pd.Timestamp.now(tz='UTC')
+    fig.add_vline(
+        x=current_time,
+        line_dash="dash",
+        line_color="gray",
+        annotation_text="Nå (kun prognose)",
+        row=1, col=1
+    )
+    
     # Wind direction
     fig.add_trace(
         go.Scatter(
@@ -590,16 +601,16 @@ def main():
     
     # Fetch data
     with st.spinner("Laster data..."):
-        # NVE data - temperature from multiple stations
-        vorma_temp = fetch_nve_data(STATION_VORMA, 1003, hours_back=72)
-        svanefoss_temp = fetch_nve_data(STATION_SVANEFOSS, 1003, hours_back=72)
-        blaker_temp = fetch_nve_data(STATION_BLAKER, 1003, hours_back=72)
-        fetsund_temp = fetch_nve_data(STATION_FETSUND, 1003, hours_back=72)
+        # NVE data - temperature from multiple stations (7 days)
+        vorma_temp = fetch_nve_data(STATION_VORMA, 1003, hours_back=168)
+        funnefoss_temp = fetch_nve_data(STATION_FUNNEFOSS, 1003, hours_back=168)
+        blaker_temp = fetch_nve_data(STATION_BLAKER, 1003, hours_back=168)
+        fetsund_temp = fetch_nve_data(STATION_FETSUND, 1003, hours_back=168)
         
-        # NVE data - discharge/vannføring
-        funnefoss_discharge = fetch_nve_data(STATION_FUNNEFOSS_DISCHARGE, 1001, hours_back=72)
-        ertesekken_discharge = fetch_nve_data(STATION_ERTESEKKEN, 1001, hours_back=72)
-        blaker_discharge = fetch_nve_data(STATION_BLAKER, 1001, hours_back=72)
+        # NVE data - discharge/vannføring (7 days)
+        funnefoss_discharge = fetch_nve_data(STATION_FUNNEFOSS_DISCHARGE, 1001, hours_back=168)
+        ertesekken_discharge = fetch_nve_data(STATION_ERTESEKKEN, 1001, hours_back=168)
+        blaker_discharge = fetch_nve_data(STATION_BLAKER, 1001, hours_back=168)
         
         # Weather forecasts
         weather_forecast = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON, days_ahead=7)
@@ -869,7 +880,7 @@ def main():
     # Temperature chart
     st.subheader("📈 Temperaturhistorikk")
     temp_chart = create_temperature_chart(
-        svanefoss_df=svanefoss_temp,
+        funnefoss_df=funnefoss_temp,
         blaker_df=blaker_temp,
         fetsund_df=fetsund_temp
     )
@@ -974,6 +985,10 @@ def main():
         wind_chart = create_wind_chart(weather_forecast.head(168))  # 7 days
         if wind_chart:
             st.plotly_chart(wind_chart, use_container_width=True)
+            st.caption("""
+            ℹ️ **Merk:** Grafen viser kun prognosedata fra Met.no. Historiske vinddata krever en 
+            annen API (frost.met.no) som ikke er integrert. Den stiplede linjen viser nåtidspunktet.
+            """)
         
         # Wind warning
         if avg_southerly >= CRITICAL_WIND_SPEED:
