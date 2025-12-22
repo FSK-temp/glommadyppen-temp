@@ -328,9 +328,12 @@ def create_temperature_chart(vorma_df, fetsund_df=None):
     fig = go.Figure()
     
     if not vorma_df.empty:
+        # Handle both 'value' and 'temperature' column names
+        temp_col = 'temperature' if 'temperature' in vorma_df.columns else 'value'
+        
         fig.add_trace(go.Scatter(
             x=vorma_df['time'],
-            y=vorma_df['value'],
+            y=vorma_df[temp_col],
             mode='lines+markers',
             name='Vorma (Funnefoss)',
             line=dict(color='#2E86AB', width=2),
@@ -338,9 +341,11 @@ def create_temperature_chart(vorma_df, fetsund_df=None):
         ))
     
     if fetsund_df is not None and not fetsund_df.empty:
+        temp_col = 'temperature' if 'temperature' in fetsund_df.columns else 'value'
+        
         fig.add_trace(go.Scatter(
             x=fetsund_df['time'],
-            y=fetsund_df['value'],
+            y=fetsund_df[temp_col],
             mode='lines+markers',
             name='Fetsund (målt)',
             line=dict(color='#A23B72', width=2),
