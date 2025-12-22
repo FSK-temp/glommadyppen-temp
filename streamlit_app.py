@@ -100,28 +100,43 @@ def fetch_nve_data(station_id, parameter, hours_back=72):
         
         if data.get('data') and len(data['data']) > 0:
             observations = data['data'][0]['observations']
+            if not observations:
+                # No observations available
+                return pd.DataFrame(columns=['time', 'value', 'quality'])
+            
             df = pd.DataFrame(observations)
+            
+            # Check if required columns exist
+            if 'time' not in df.columns or 'value' not in df.columns:
+                return pd.DataFrame(columns=['time', 'value', 'quality'])
+            
             df['time'] = pd.to_datetime(df['time'])
             
             end_time = pd.Timestamp.now(tz='UTC')
             cutoff_time = end_time - pd.Timedelta(hours=hours_back)
             df = df[df['time'] >= cutoff_time]
-            df = df[df['quality'].isin([1, 2])]  # Quality controlled data only
+            
+            if 'quality' in df.columns:
+                df = df[df['quality'].isin([1, 2])]  # Quality controlled data only
+            
             df = df.sort_values('time').reset_index(drop=True)
+            
+            # Ensure all required columns exist
+            for col in ['time', 'value', 'quality']:
+                if col not in df.columns:
+                    df[col] = None
             
             return df[['time', 'value', 'quality']]
         else:
             return pd.DataFrame(columns=['time', 'value', 'quality'])
             
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 400:
-            # Station might not have current data (winter shutdown)
-            return pd.DataFrame(columns=['time', 'value', 'quality'])
-        else:
-            st.warning(f"NVE API error: {e.response.status_code}")
-            return pd.DataFrame(columns=['time', 'value', 'quality'])
+        # Don't show warnings for expected cases (400 = station offline)
+        return pd.DataFrame(columns=['time', 'value', 'quality'])
     except Exception as e:
-        st.warning(f"Could not fetch data: {str(e)[:100]}")
+        # Only show warning for unexpected errors, not for missing data
+        if 'time' not in str(e):
+            st.warning(f"Data fetch error for station {station_id}: {str(e)[:100]}")
         return pd.DataFrame(columns=['time', 'value', 'quality'])
 
 @st.cache_data(ttl=21600)  # Cache for 6 hours
@@ -507,16 +522,6 @@ def create_wind_chart(weather_df):
         line_dash="dot",
         line_color="red",
         annotation_text=f"Kritisk terskel ({CRITICAL_WIND_SPEED} m/s)",
-        row=1, col=1
-    )
-    
-    # Add vertical line showing "now" (forecast only - no historical data available)
-    current_time = pd.Timestamp.now(tz='UTC').to_pydatetime()
-    fig.add_vline(
-        x=current_time,
-        line_dash="dash",
-        line_color="gray",
-        annotation_text="Nå (kun prognose)",
         row=1, col=1
     )
     
@@ -987,7 +992,7 @@ def main():
             st.plotly_chart(wind_chart, use_container_width=True)
             st.caption("""
             ℹ️ **Merk:** Grafen viser kun prognosedata fra Met.no. Historiske vinddata krever en 
-            annen API (frost.met.no) som ikke er integrert. Den stiplede linjen viser nåtidspunktet.
+            annen API (frost.met.no) som ikke er integrert. Alle datapunkter er fremtidsprognoser.
             """)
         
         # Wind warning
