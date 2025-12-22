@@ -547,6 +547,28 @@ def main():
     # Rename value column
     vorma_temp = vorma_temp.rename(columns={'value': 'temperature'})
     
+    # Check data recency
+    latest_time = pd.to_datetime(vorma_temp.iloc[-1]['time'])
+    if latest_time.tz is None:
+        latest_time = latest_time.tz_localize('UTC')
+    data_age_days = (pd.Timestamp.now(tz='UTC') - latest_time).total_seconds() / 86400
+    
+    # If data is very old (>7 days), show warning
+    if data_age_days > 7:
+        st.warning(f"""
+        ⚠️ **Utdaterte måledata**
+        
+        Siste måling fra Vorma er **{data_age_days:.1f} dager gammel** 
+        (målt {latest_time.strftime('%d.%m.%Y kl. %H:%M')}).
+        
+        Dette indikerer at stasjonen kan være offline for vintersesong.
+        
+        - **Værvarsling fungerer:** Vinddata fra Mjøsa oppdateres fortsatt
+        - **Stasjon kommer tilbake:** Forventes aktiv igjen i april 2026
+        - **Historiske data:** Vises nedenfor for referanse
+        """)
+        st.divider()
+    
     # Main prediction section
     st.header("📊 Temperaturprediksjon")
     
@@ -560,10 +582,17 @@ def main():
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
+        # Calculate 24-hour change only if enough data available
+        if len(vorma_temp) >= 24:
+            temp_24h_ago = vorma_temp.iloc[-24]['temperature']
+            delta_24h = f"{latest_vorma['temperature'] - temp_24h_ago:.1f}°C (24t)"
+        else:
+            delta_24h = "Ikke nok data"
+        
         st.metric(
             "Vorma nå",
             f"{latest_vorma['temperature']:.1f}°C",
-            delta=f"{latest_vorma['temperature'] - vorma_temp.iloc[-24]['temperature']:.1f}°C (24t)"
+            delta=delta_24h
         )
     
     with col2:
@@ -620,7 +649,26 @@ def main():
         event_date
     )
     
-    if prediction:
+    # Check if data is too old for meaningful prediction
+    days_until_event = (event_date - pd.Timestamp.now(tz='UTC')).days
+    
+    if data_age_days > 30 and days_until_event > 30:
+        st.info(f"""
+        📊 **Prediksjon ikke tilgjengelig**
+        
+        Sanntids-prediksjon krever ferske målinger fra Vorma. Siden siste måling er 
+        {data_age_days:.0f} dager gammel, kan vi ikke lage en pålitelig prognose ennå.
+        
+        **Prediksjonen vil være tilgjengelig når:**
+        - Målestasjon starter opp igjen (april 2026)
+        - Vi kommer nærmere arrangementsdatoen
+        
+        **Basert på historiske data:**
+        - Gjennomsnittlig temperatur i Fetsund tidlig august: 16-18°C
+        - Risiko for kaldt vann hvis vedvarende sørlig vind over Mjøsa
+        - 25 timers reisevarsel fra Vorma til Fetsund
+        """)
+    elif prediction:
         risk_level, risk_color = assess_risk_level(prediction, weather_forecast)
         
         # Big prediction display
