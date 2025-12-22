@@ -197,8 +197,18 @@ def predict_fetsund_temperature(vorma_temp_df, event_datetime):
     if vorma_temp_df.empty:
         return None
     
+    # Ensure event_datetime is timezone-aware
+    if event_datetime.tzinfo is None:
+        event_datetime = event_datetime.replace(tzinfo=pd.Timestamp.now(tz='UTC').tzinfo)
+    
     # Get Vorma temperature 25 hours before event
     prediction_time = event_datetime - timedelta(hours=TRAVEL_TIME_HOURS)
+    
+    # Ensure time column is timezone-aware
+    vorma_temp_df = vorma_temp_df.copy()
+    vorma_temp_df['time'] = pd.to_datetime(vorma_temp_df['time'])
+    if vorma_temp_df['time'].dt.tz is None:
+        vorma_temp_df['time'] = vorma_temp_df['time'].dt.tz_localize('UTC')
     
     # Find closest observation
     vorma_temp_df['time_diff'] = abs(vorma_temp_df['time'] - prediction_time)
@@ -303,8 +313,11 @@ def calculate_event_date(year):
     
     event_date = first_day + timedelta(days=days_until_saturday)
     
-    # Set time to 10:00 (event start)
-    return event_date.replace(hour=10, minute=0, second=0)
+    # Set time to 10:00 (event start) and make timezone-aware
+    event_date = event_date.replace(hour=10, minute=0, second=0)
+    event_date = pd.Timestamp(event_date).tz_localize('Europe/Oslo').tz_convert('UTC')
+    
+    return event_date
 
 # ============================================================================
 # VISUALIZATION FUNCTIONS
@@ -442,7 +455,7 @@ def main():
     
     # Calculate next event date
     event_date = calculate_event_date(EVENT_YEAR)
-    days_until = (event_date - datetime.now()).days
+    days_until = (event_date - pd.Timestamp.now(tz='UTC')).days
     
     # Event info banner
     col1, col2, col3, col4 = st.columns(4)
