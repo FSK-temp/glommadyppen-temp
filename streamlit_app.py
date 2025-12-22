@@ -40,12 +40,21 @@ except (KeyError, FileNotFoundError):
 NVE_BASE_URL = "https://hydapi.nve.no/api/v1"
 
 # Station IDs
-STATION_VORMA = "2.410.0"  # Funnefoss overvann
+STATION_VORMA = "2.410.0"  # Funnefoss overvann (temperature)
 STATION_BLAKER = "2.17.0"  # Blaker (Glomma)
+STATION_ERTESEKKEN = "2.16.0"  # Ertesekken
+STATION_FUNNEFOSS_DISCHARGE = "2.279.0"  # Funnefoss nedre (discharge)
 
 # Weather location (Mjøsa)
 MJOSA_LAT = 60.403489
 MJOSA_LON = 11.230855
+
+# Additional weather locations
+BINGSFOSSEN_LAT = 60.2172
+BINGSFOSSEN_LON = 11.5528
+
+FETSUND_LAT = 59.9297
+FETSUND_LON = 11.5833
 
 # Model parameters (from research)
 TRAVEL_TIME_HOURS = 25  # Vorma to Fetsund
@@ -323,6 +332,56 @@ def calculate_event_date(year):
 # VISUALIZATION FUNCTIONS
 # ============================================================================
 
+def create_discharge_chart(funnefoss_df, ertesekken_df, blaker_df):
+    """Create water discharge chart for multiple stations"""
+    fig = go.Figure()
+    
+    if not funnefoss_df.empty:
+        fig.add_trace(go.Scatter(
+            x=funnefoss_df['time'],
+            y=funnefoss_df['value'],
+            mode='lines',
+            name='Funnefoss',
+            line=dict(color='#2E86AB', width=2)
+        ))
+    
+    if not ertesekken_df.empty:
+        fig.add_trace(go.Scatter(
+            x=ertesekken_df['time'],
+            y=ertesekken_df['value'],
+            mode='lines',
+            name='Ertesekken',
+            line=dict(color='#06A77D', width=2)
+        ))
+    
+    if not blaker_df.empty:
+        fig.add_trace(go.Scatter(
+            x=blaker_df['time'],
+            y=blaker_df['value'],
+            mode='lines',
+            name='Blaker',
+            line=dict(color='#A23B72', width=2)
+        ))
+    
+    fig.update_layout(
+        title="Vannføring - Siste 72 timer",
+        xaxis_title="Tid",
+        yaxis_title="Vannføring (m³/s)",
+        hovermode='x unified',
+        height=400,
+        template='plotly_white',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10)
+        )
+    )
+    
+    return fig
+
 def create_temperature_chart(vorma_df, fetsund_df=None):
     """Create interactive temperature chart"""
     fig = go.Figure()
@@ -362,6 +421,31 @@ def create_temperature_chart(vorma_df, fetsund_df=None):
     )
     
     return fig
+
+def create_weather_forecast_table(weather_df, days=7):
+    """Create a simple weather forecast summary table"""
+    if weather_df.empty:
+        return None
+    
+    # Group by day and calculate daily summaries
+    weather_df = weather_df.copy()
+    weather_df['date'] = pd.to_datetime(weather_df['time']).dt.date
+    
+    daily_summary = []
+    for date in weather_df['date'].unique()[:days]:
+        day_data = weather_df[weather_df['date'] == date]
+        
+        summary = {
+            'Dato': pd.to_datetime(date).strftime('%a %d.%m'),
+            'Min temp': f"{day_data['air_temperature'].min():.1f}°C",
+            'Max temp': f"{day_data['air_temperature'].max():.1f}°C",
+            'Gj.snitt vind': f"{day_data['wind_speed'].mean():.1f} m/s",
+            'Maks vind': f"{day_data['wind_speed'].max():.1f} m/s",
+            'Vindretning': f"{day_data['wind_direction'].mean():.0f}°"
+        }
+        daily_summary.append(summary)
+    
+    return pd.DataFrame(daily_summary)
 
 def create_wind_chart(weather_df):
     """Create wind speed and direction chart"""
@@ -444,7 +528,15 @@ def create_wind_chart(weather_df):
     fig.update_layout(
         height=600,
         showlegend=True,
-        template='plotly_white'
+        template='plotly_white',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10)  # Smaller font for legend
+        )
     )
     
     return fig
@@ -482,11 +574,19 @@ def main():
     
     # Fetch data
     with st.spinner("Laster data..."):
-        # NVE data
+        # NVE data - temperature
         vorma_temp = fetch_nve_data(STATION_VORMA, 1003, hours_back=72)
         
-        # Weather forecast
+        # NVE data - discharge/vannføring
+        funnefoss_discharge = fetch_nve_data(STATION_FUNNEFOSS_DISCHARGE, 1001, hours_back=72)
+        ertesekken_discharge = fetch_nve_data(STATION_ERTESEKKEN, 1001, hours_back=72)
+        blaker_discharge = fetch_nve_data(STATION_BLAKER, 1001, hours_back=72)
+        
+        # Weather forecasts
         weather_forecast = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON, days_ahead=7)
+        weather_bingsfossen = fetch_weather_forecast(BINGSFOSSEN_LAT, BINGSFOSSEN_LON, days_ahead=7)
+        weather_fetsund = fetch_weather_forecast(FETSUND_LAT, FETSUND_LON, days_ahead=7)
+        
         if not weather_forecast.empty:
             weather_forecast = calculate_southerly_wind(weather_forecast)
     
@@ -747,6 +847,56 @@ def main():
     temp_chart = create_temperature_chart(vorma_temp)
     st.plotly_chart(temp_chart, use_container_width=True)
     
+    # Discharge/Vannføring section
+    st.divider()
+    st.subheader("💧 Vannføring")
+    
+    # Check if we have any discharge data
+    has_discharge = not (funnefoss_discharge.empty and ertesekken_discharge.empty and blaker_discharge.empty)
+    
+    if has_discharge:
+        # Display current discharge values
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if not funnefoss_discharge.empty:
+                latest = funnefoss_discharge.iloc[-1]
+                st.metric("Funnefoss", f"{latest['value']:.0f} m³/s")
+            else:
+                st.metric("Funnefoss", "Ingen data")
+        
+        with col2:
+            if not ertesekken_discharge.empty:
+                latest = ertesekken_discharge.iloc[-1]
+                st.metric("Ertesekken", f"{latest['value']:.0f} m³/s")
+            else:
+                st.metric("Ertesekken", "Ingen data")
+        
+        with col3:
+            if not blaker_discharge.empty:
+                latest = blaker_discharge.iloc[-1]
+                st.metric("Blaker", f"{latest['value']:.0f} m³/s")
+            else:
+                st.metric("Blaker", "Ingen data")
+        
+        # Discharge chart
+        discharge_chart = create_discharge_chart(
+            funnefoss_discharge, 
+            ertesekken_discharge, 
+            blaker_discharge
+        )
+        st.plotly_chart(discharge_chart, use_container_width=True)
+        
+        # Info about discharge
+        st.info("""
+        **Om vannføring:**
+        - Høy vannføring kan påvirke strømforholdene under Glommadyppen
+        - Typisk vannføring i august: 200-400 m³/s ved Blaker
+        - Funnefoss og Ertesekken viser vannføring fra Vorma før samløpet med Glomma
+        """)
+    else:
+        st.info("Vannføringsdata ikke tilgjengelig for øyeblikket. Dette er normalt utenfor målesesongen.")
+    
     # Wind analysis
     if not weather_forecast.empty:
         st.subheader("💨 Vindanalyse (Mjøsa)")
@@ -773,6 +923,26 @@ def main():
             else:
                 st.metric("Sørlig vind (48t)", f"{avg_southerly:.1f} m/s")
         
+        # 7-day wind forecast summary
+        st.markdown("**7-dagers vindprognose:**")
+        
+        # Create forecast by day
+        forecast_days = []
+        weather_forecast_copy = weather_forecast.copy()
+        weather_forecast_copy['date'] = pd.to_datetime(weather_forecast_copy['time']).dt.date
+        
+        for i, date in enumerate(weather_forecast_copy['date'].unique()[:7]):
+            day_data = weather_forecast_copy[weather_forecast_copy['date'] == date]
+            day_name = pd.to_datetime(date).strftime('%A %d.%m')
+            avg_wind_day = day_data['wind_speed'].mean()
+            avg_southerly_day = day_data['southerly_wind'].mean()
+            
+            status = "🟢 Lav" if avg_southerly_day < 1.5 else "⚠️ Moderat" if avg_southerly_day < 2.5 else "🔴 Høy"
+            
+            forecast_days.append(f"- **{day_name}**: Gj.snitt {avg_wind_day:.1f} m/s | Sørlig {avg_southerly_day:.1f} m/s | Oppdriftsrisiko: {status}")
+        
+        st.markdown("\n".join(forecast_days))
+        
         wind_chart = create_wind_chart(weather_forecast.head(168))  # 7 days
         if wind_chart:
             st.plotly_chart(wind_chart, use_container_width=True)
@@ -787,6 +957,37 @@ def main():
             
             Forventer temperaturfall i Vorma innen 24-48 timer.
             """)
+    
+    # Weather forecasts for swim locations
+    st.divider()
+    st.subheader("🌤️ Værvarsling - Bingsfossen og Fetsund")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📍 Bingsfossen (start)")
+        if not weather_bingsfossen.empty:
+            bingsfossen_table = create_weather_forecast_table(weather_bingsfossen, days=7)
+            if bingsfossen_table is not None:
+                st.dataframe(bingsfossen_table, use_container_width=True, hide_index=True)
+        else:
+            st.warning("Værdata ikke tilgjengelig")
+    
+    with col2:
+        st.markdown("### 🏁 Fetsund (mål)")
+        if not weather_fetsund.empty:
+            fetsund_table = create_weather_forecast_table(weather_fetsund, days=7)
+            if fetsund_table is not None:
+                st.dataframe(fetsund_table, use_container_width=True, hide_index=True)
+        else:
+            st.warning("Værdata ikke tilgjengelig")
+    
+    st.info("""
+    **Om værprognosene:**
+    - Viser 7-dagers værvarsel for start (Bingsfossen) og mål (Fetsund)
+    - Oppdateres hver 6. time fra Met.no
+    - Nøyaktigheten reduseres med lengre tidshorisont
+    """)
     
     # Sidebar with information
     with st.sidebar:
