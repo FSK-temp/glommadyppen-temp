@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import plotly.graph_objects as go
 import requests
 
@@ -96,7 +96,20 @@ def fetch_metno_forecast():
         return None, f"Feil: {str(e)}"
 
 def calculate_risk_for_date(wind_df, target_date):
-    """Beregn risiko for en spesifikk dato basert på 7 dager før"""
+    """
+    Beregn risiko for en spesifikk dato basert på 7 dager før
+    
+    FIKSET: Håndterer både date og datetime objekter
+    """
+    
+    # KRITISK FIX: Konverter target_date til datetime hvis det er en date
+    if isinstance(target_date, date) and not isinstance(target_date, datetime):
+        target_date = datetime.combine(target_date, datetime.min.time())
+    
+    # Sikre at target_date er timezone-aware hvis wind_df er det
+    if not target_date.tzinfo and len(wind_df) > 0:
+        if wind_df['timestamp'].dt.tz is not None:
+            target_date = target_date.replace(tzinfo=wind_df['timestamp'].dt.tz)
     
     analysis_start = target_date - timedelta(days=7)
     
@@ -189,6 +202,10 @@ if mode == "📅 21-dagers prediksjon":
         
         daily_risk = []
         now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+        
+        # Sikre timezone-awareness
+        if len(forecast_df) > 0 and forecast_df['timestamp'].dt.tz is not None:
+            now = now.replace(tzinfo=forecast_df['timestamp'].dt.tz)
         
         for day_offset in range(21):
             target_date = now + timedelta(days=day_offset)
@@ -303,6 +320,7 @@ elif mode == "🔍 Spesifikk dato":
     
     st.header(f"🔍 Analyse for {event_date.strftime('%d. %B %Y')}")
     
+    # Konverter event_date til datetime
     target_datetime = datetime.combine(event_date, datetime.min.time()) + timedelta(hours=12)
     
     # Beregn risiko
@@ -331,7 +349,7 @@ elif mode == "🔍 Spesifikk dato":
         st.metric("Timer sørøst/sør", f"{risk_info['hours']:.0f}")
     
     with col3:
-        pct = 100 * risk_info['hours'] / len(risk_info['period_df'])
+        pct = 100 * risk_info['hours'] / len(risk_info['period_df']) if len(risk_info['period_df']) > 0 else 0
         st.metric("Andel kritisk vind", f"{pct:.1f}%")
     
     # Temperaturprediksjon
@@ -406,18 +424,16 @@ elif mode == "🔍 Spesifikk dato":
 
 # --- MODE 3: HISTORISK VALIDERING ---
 
-else:  # Historisk validering
-    
+else:
     st.header("📊 Historisk validering")
     
     st.info("""
     **Modus for testing og validering**
     
-    Her kan du teste modellen mot historiske Glommadyppen-arrangementer 
-    ved å bruke Frost API (historiske data).
-    """)
+    Her kan du teste modellen mot historiske Glommadyppen-arrangementer.
     
-    st.markdown("Se tidligere filer for full historisk validering.")
+    Bruk glommadyppen_app_FINAL.py for full historisk validering med Frost API.
+    """)
 
 # --- FOOTER ---
 
@@ -449,7 +465,6 @@ with st.expander("ℹ️ Om systemet"):
     **Datakilder:**
     - Værvarsel: Met.no Locationforecast API
     - Historisk: Frost API (Met.no)
-    - Temperatur: NVE HydAPI (fremtidig)
     
-    Utviklet av Anton Vooren (2026)
+    Utviklet av Anton Helge Hovden (2026)
     """)
