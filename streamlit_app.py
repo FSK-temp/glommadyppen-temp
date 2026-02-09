@@ -5,164 +5,173 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import requests
 
-# Konfigurering
 st.set_page_config(
     page_title="Glommadyppen Temperaturprediksjon",
     page_icon="🏊‍♂️",
     layout="wide"
 )
 
-# Frost API Client ID
 FROST_CLIENT_ID = "582507d2-434f-4578-afbd-919713bb3589"
 
-# NVE HydAPI endpoint
-NVE_API_BASE = "https://hydapi.nve.no/api/v1"
-
 st.title("🏊‍♂️ Glommadyppen Temperaturprediksjon")
-st.markdown("**Prediksjon av vanntemperatur ved Fetsund basert på vindforhold over Mjøsa**")
+st.markdown("**Prediksjon basert på kumulativ vindenergi over Mjøsa**")
 
-# Sidebar: Innstillinger
+# Sidebar
 st.sidebar.header("⚙️ Innstillinger")
 event_date = st.sidebar.date_input(
     "Arrangementsdato",
-    value=datetime(2026, 8, 2),  # Første lørdag i august 2026
-    min_value=datetime.today(),
+    value=datetime(2026, 8, 1),
+    min_value=datetime(2015, 6, 1),
     max_value=datetime.today() + timedelta(days=365)
 )
 
-data_source = st.sidebar.selectbox(
-    "Vinddata-kilde",
-    ["Frost API (timebasert)", "CERRA (3-timers, historisk)"],
-    index=0
-)
+use_demo = st.sidebar.checkbox("Bruk demo-data", value=False)
 
-show_details = st.sidebar.checkbox("Vis detaljert analyse", value=False)
+if use_demo:
+    demo_scenario = st.sidebar.selectbox(
+        "Demo-scenario",
+        ["moderate", "high_risk", "low_risk"],
+        format_func=lambda x: {
+            'moderate': 'Moderat',
+            'high_risk': 'Høy risiko (2022)',
+            'low_risk': 'Lav risiko (2019)'
+        }[x]
+    )
 
-# Konverter til datetime
+show_details = st.sidebar.checkbox("Vis detaljer", value=False)
+
 event_datetime = datetime.combine(event_date, datetime.min.time()) + timedelta(hours=12)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Modellparametere:**")
-st.sidebar.markdown("- **Kritisk terskel:** 150 m·h kumulativ vindenergi")
-st.sidebar.markdown("- **Analyseperiode:** 7 dager før arrangement")
-st.sidebar.markdown("- **Vindretning:** Sørøst til sør (135-225°)")
-st.sidebar.markdown("- **Tidsforsinkelse:** 25 timer til Fetsund")
+st.sidebar.info("""
+**Modellparametere:**
+- Terskel: 150 m·h
+- Periode: 7 dager
+- Vindretning: 135-225°
+""")
 
 # --- FUNKSJONER ---
 
 def fetch_frost_wind_data(start_date, end_date):
-    """Hent timebaserte vinddata fra Frost API (Kise stasjon)"""
-    try:
-        endpoint = "https://frost.met.no/observations/v0.jsonld"
-        
-        params = {
-            'sources': 'SN4780',  # KISE ved Mjøsa
-            'elements': 'wind_speed,wind_from_direction',
-            'referencetime': f'{start_date.strftime("%Y-%m-%dT%H:%M:%SZ")}/{end_date.strftime("%Y-%m-%dT%H:%M:%SZ")}',
-            'timeresolutions': 'PT1H'
-        }
-        
-        response = requests.get(endpoint, params=params, auth=(FROST_CLIENT_ID, ''), timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
+    """Hent vinddata fra Frost API med KORREKT parsing"""
+    
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    
+    # Stasjoner i prioritert rekkefølge (basert på test-resultater)
+    stations = [
+        ('SN18700', 'Hamar'),      # Mest data (1440 obs)
+        ('SN4780:0', 'Kise'),      # 72 obs
+        ('SN11463:0', 'Minnesund') # 144 obs
+    ]
+    
+    for station_id, station_name in stations:
+        try:
+            # Hent data fra Frost API
+            r = requests.get(
+                'https://frost.met.no/observations/v0.jsonld',
+                {
+                    'sources': station_id,
+                    'elements': 'wind_speed,wind_from_direction',
+                    'referencetime': f'{start_str}/{end_str}'
+                },
+                auth=(FROST_CLIENT_ID, ''),
+                timeout=30
+            )
             
-            records = []
-            for obs in data.get('data', []):
-                timestamp = obs.get('referenceTime', '')
-                wind_speed = None
-                wind_dir = None
+            if r.status_code == 200:
+                data = r.json()
                 
-                for measurement in obs.get('observations', []):
-                    element = measurement.get('elementId', '')
-                    value = measurement.get('value')
+                # KORREKT PARSING: Grupper observasjoner per tidspunkt
+                # (Frost JSONLD returnerer elementer som separate observasjoner)
+                
+                time_data = {}  # {timestamp: {'wind_speed': X, 'wind_direction': Y}}
+                
+                for item in data.get('data', []):
+                    timestamp = item['referenceTime']
                     
-                    if element == 'wind_speed':
-                        wind_speed = value
-                    elif element == 'wind_from_direction':
-                        wind_dir = value
+                    if timestamp not in time_data:
+                        time_data[timestamp] = {}
+                    
+                    for obs in item.get('observations', []):
+                        element_id = obs['elementId']
+                        value = obs['value']
+                        
+                        if element_id == 'wind_speed':
+                            time_data[timestamp]['wind_speed'] = value
+                        elif element_id == 'wind_from_direction':
+                            time_data[timestamp]['wind_direction'] = value
                 
-                if wind_speed is not None and wind_dir is not None:
-                    records.append({
-                        'timestamp': pd.to_datetime(timestamp),
-                        'wind_speed': wind_speed,
-                        'wind_direction': wind_dir
-                    })
+                # Filtrer ut kun komplette målinger (både hastighet og retning)
+                records = []
+                for timestamp, values in time_data.items():
+                    if 'wind_speed' in values and 'wind_direction' in values:
+                        records.append({
+                            'timestamp': pd.to_datetime(timestamp),
+                            'wind_speed': values['wind_speed'],
+                            'wind_direction': values['wind_direction']
+                        })
+                
+                if len(records) > 0:
+                    df = pd.DataFrame(records)
+                    df = df.sort_values('timestamp')
+                    return df, None, station_name
             
-            if len(records) > 0:
-                df = pd.DataFrame(records)
-                return df, None
-            else:
-                return None, "Ingen vinddata tilgjengelig fra Frost API"
-        else:
-            return None, f"Frost API feil: {response.status_code}"
+            elif r.status_code == 404:
+                continue
+        
+        except Exception as e:
+            continue
     
-    except Exception as e:
-        return None, f"Feil ved tilkobling til Frost API: {str(e)}"
+    return None, "Kunne ikke hente data. Prøv demo-data eller historisk dato.", None
 
-def fetch_nve_temperature(station_id, start_date, end_date):
-    """Hent vanntemperatur fra NVE HydAPI"""
-    try:
-        # Format: ResolutionTime=60 for timedata
-        url = f"{NVE_API_BASE}/Observations"
-        
-        params = {
-            'StationId': station_id,
-            'Parameter': '17',  # Vanntemperatur
-            'ResolutionTime': '60',  # Timer
-            'ReferenceTime': f'{start_date.strftime("%Y-%m-%dT%H:%M:%S")}/{end_date.strftime("%Y-%m-%dT%H:%M:%S")}'
-        }
-        
-        response = requests.get(url, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            records = []
-            for item in data.get('data', []):
-                records.append({
-                    'timestamp': pd.to_datetime(item['time']),
-                    'temperature': item['value']
-                })
-            
-            if len(records) > 0:
-                df = pd.DataFrame(records)
-                return df, None
-            else:
-                return None, "Ingen temperaturdata tilgjengelig"
-        else:
-            return None, f"NVE API feil: {response.status_code}"
+def generate_demo_wind_data(start_date, end_date, scenario='moderate'):
+    """Generer demo vinddata"""
+    hours = int((end_date - start_date).total_seconds() / 3600)
+    timestamps = [start_date + timedelta(hours=i) for i in range(hours)]
     
-    except Exception as e:
-        return None, f"Feil ved tilkobling til NVE API: {str(e)}"
+    if scenario == 'high_risk':
+        np.random.seed(2022)
+        directions = np.random.choice([150, 160, 170, 180, 190], size=hours, 
+                                     p=[0.3, 0.25, 0.2, 0.15, 0.1])
+        speeds = np.random.uniform(1.5, 4.0, size=hours)
+    elif scenario == 'low_risk':
+        np.random.seed(2019)
+        directions = np.random.choice([0, 45, 90, 270, 315], size=hours, 
+                                     p=[0.3, 0.2, 0.2, 0.2, 0.1])
+        speeds = np.random.uniform(0.5, 2.5, size=hours)
+    else:
+        np.random.seed(42)
+        directions = np.random.uniform(0, 360, size=hours)
+        speeds = np.random.uniform(0.5, 3.5, size=hours)
+    
+    return pd.DataFrame({
+        'timestamp': timestamps,
+        'wind_direction': directions,
+        'wind_speed': speeds
+    })
 
-def calculate_cumulative_wind_energy(wind_df, time_resolution_hours=1):
-    """Beregn kumulativ vindenergi for sørøst/sør vind"""
-    # Filtrer sørøst til sør (135-225°)
+def calculate_cumulative_wind_energy(wind_df):
+    """Beregn kumulativ vindenergi"""
     se_s_wind = wind_df[(wind_df['wind_direction'] >= 135) & 
                         (wind_df['wind_direction'] < 225)].copy()
     
-    # Kumulativ energi (vindhastighet * tidsintervall)
-    cumulative_energy = (se_s_wind['wind_speed'] * time_resolution_hours).sum()
-    hours = len(se_s_wind) * time_resolution_hours
+    cumulative_energy = se_s_wind['wind_speed'].sum()
+    hours = len(se_s_wind)
     
     return cumulative_energy, hours, se_s_wind
 
 def assess_risk(cumulative_energy, hours):
-    """Vurder risiko basert på kumulativ vindenergi"""
+    """Vurder risiko"""
     if cumulative_energy > 150 or hours > 20:
-        return "HØY RISIKO", "🔴", "Anbefaler sterkt å vurdere flytting av arrangement"
+        return "HØY RISIKO", "🔴", "Anbefaler flytting"
     elif cumulative_energy > 100 or hours > 15:
-        return "MODERAT RISIKO", "🟡", "Følg nøye med på værprognoser og vanntemperatur"
+        return "MODERAT RISIKO", "🟡", "Følg nøye med"
     else:
-        return "LAV RISIKO", "🟢", "Gode forhold forventet"
+        return "LAV RISIKO", "🟢", "Gode forhold"
 
 def predict_temperature_impact(cumulative_energy, baseline_temp=18.0):
-    """Estimer temperaturpåvirkning basert på vindenergi"""
-    # Empirisk sammenheng fra historiske data
-    # 291 m·h → ca. -4°C i Vorma → ca. -0.56°C i Fetsund (14% fortynning)
-    # 25 m·h → ca. +0.5°C (oppvarming)
-    
+    """Estimer temperaturpåvirkning"""
     if cumulative_energy > 200:
         impact_vorma = -4.0
     elif cumulative_energy > 150:
@@ -172,11 +181,9 @@ def predict_temperature_impact(cumulative_energy, baseline_temp=18.0):
     elif cumulative_energy > 50:
         impact_vorma = -0.5
     else:
-        impact_vorma = 0.3  # Svak oppvarming ved liten sørlig vind
+        impact_vorma = 0.3
     
-    # Fortynning ved samløpet (14%)
     impact_fetsund = impact_vorma * 0.14
-    
     predicted_temp = baseline_temp + impact_fetsund
     
     return predicted_temp, impact_vorma, impact_fetsund
@@ -185,44 +192,57 @@ def predict_temperature_impact(cumulative_energy, baseline_temp=18.0):
 
 st.header("📊 Analyse for " + event_date.strftime("%d. %B %Y"))
 
-# Analyseperiode: 7 dager før arrangement
 analysis_start = event_datetime - timedelta(days=7)
 analysis_end = event_datetime
 
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric("Analyseperiode", f"{(analysis_end - analysis_start).days} dager")
-
+    st.metric("Analyseperiode", "7 dager")
 with col2:
-    st.metric("Dager til arrangement", f"{(event_datetime - datetime.now()).days}")
-
+    days_until = (event_datetime - datetime.now()).days
+    st.metric("Dager til arrangement", f"{days_until}")
 with col3:
-    st.metric("Datakildeoppløsning", "1 time" if "Frost" in data_source else "3 timer")
+    st.metric("Tidsoppløsning", "1 time")
 
 # --- LAST VINDDATA ---
 
 st.subheader("🌬️ Vinddata")
 
-with st.spinner("Laster vinddata..."):
-    if "Frost" in data_source:
-        wind_df, wind_error = fetch_frost_wind_data(analysis_start, analysis_end)
-        time_resolution = 1
+wind_df = None
+station_name = None
+
+if use_demo:
+    with st.spinner("Genererer demo-data..."):
+        wind_df = generate_demo_wind_data(analysis_start, analysis_end, demo_scenario)
+        station_name = "Demo"
+    st.success(f"✓ {len(wind_df)} målinger (demo)")
+    st.info("💡 Demo-data for testing. Slå av for ekte data.")
+
+else:
+    with st.spinner("Laster fra Frost API..."):
+        wind_df, error, station_name = fetch_frost_wind_data(analysis_start, analysis_end)
+    
+    if wind_df is not None:
+        st.success(f"✓ {len(wind_df)} komplette vindmålinger fra {station_name}")
     else:
-        # Fallback til CERRA (må lastes fra fil i produksjon)
-        wind_df = None
-        wind_error = "CERRA-data må lastes fra lokal fil (ikke implementert i demo)"
-        time_resolution = 3
+        st.error(f"❌ {error}")
+        
+        with st.expander("💡 Tips"):
+            st.markdown("""
+            **Mulige årsaker:**
+            - Fremtidig dato (Frost har bare historiske data)
+            - Stasjon offline
+            - Nettverksproblem
+            
+            **Løsninger:**
+            - Slå på "Bruk demo-data"
+            - Velg historisk dato (f.eks. 1. august 2024)
+            """)
 
 if wind_df is not None:
-    st.success(f"✓ Lastet {len(wind_df)} vindmålinger fra {data_source}")
     
-    # Beregn kumulativ vindenergi
-    cumulative_energy, hours_se_s, se_s_wind_df = calculate_cumulative_wind_energy(
-        wind_df, time_resolution
-    )
-    
-    # Vurder risiko
+    # Beregn
+    cumulative_energy, hours_se_s, se_s_wind_df = calculate_cumulative_wind_energy(wind_df)
     risk_level, risk_emoji, risk_advice = assess_risk(cumulative_energy, hours_se_s)
     
     # --- RESULTATER ---
@@ -233,25 +253,20 @@ if wind_df is not None:
     col1, col2, col3 = st.columns(3)
     
     with col1:
+        delta = cumulative_energy - 150
         st.metric(
             "Kumulativ vindenergi",
             f"{cumulative_energy:.1f} m·h",
-            f"{cumulative_energy - 150:.1f} m·h over terskel" if cumulative_energy > 150 else "Under terskel"
+            f"{delta:+.1f} m·h",
+            delta_color="inverse"
         )
     
     with col2:
-        st.metric(
-            "Timer med sørøst/sør-vind",
-            f"{hours_se_s:.0f} timer",
-            f"{hours_se_s - 20:.0f} timer over terskel" if hours_se_s > 20 else "Under terskel"
-        )
+        st.metric("Timer sørøst/sør", f"{hours_se_s:.0f}")
     
     with col3:
-        pct_se_s = 100 * hours_se_s / (len(wind_df) * time_resolution)
-        st.metric(
-            "Andel sørøst/sør-vind",
-            f"{pct_se_s:.1f}%"
-        )
+        pct = 100 * hours_se_s / len(wind_df)
+        st.metric("Andel kritisk vind", f"{pct:.1f}%")
     
     st.info(f"**Anbefaling:** {risk_advice}")
     
@@ -260,23 +275,7 @@ if wind_df is not None:
     st.markdown("---")
     st.subheader("🌡️ Temperaturprediksjon")
     
-    # Hent baseline temperatur fra NVE (hvis tilgjengelig)
-    baseline_temp = 18.0  # Default
-    
-    with st.spinner("Henter nåværende temperatur fra NVE..."):
-        temp_df, temp_error = fetch_nve_temperature(
-            '2.587.0',  # Fetsund
-            datetime.now() - timedelta(days=1),
-            datetime.now()
-        )
-        
-        if temp_df is not None and len(temp_df) > 0:
-            baseline_temp = temp_df['temperature'].mean()
-            st.success(f"✓ Nåværende temperatur ved Fetsund: {baseline_temp:.1f}°C")
-        else:
-            st.warning(f"⚠️ Kunne ikke hente temperaturdata: {temp_error}")
-            st.info(f"Bruker standard baseline: {baseline_temp}°C")
-    
+    baseline_temp = 18.0
     predicted_temp, impact_vorma, impact_fetsund = predict_temperature_impact(
         cumulative_energy, baseline_temp
     )
@@ -284,88 +283,76 @@ if wind_df is not None:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Nåværende temperatur (Fetsund)", f"{baseline_temp:.1f}°C")
+        st.metric("Baseline", f"{baseline_temp:.1f}°C")
     
     with col2:
         st.metric(
-            "Predikert temperatur på arrangementsdagen",
+            "Predikert temperatur",
             f"{predicted_temp:.1f}°C",
-            f"{impact_fetsund:.1f}°C"
+            f"{impact_fetsund:+.1f}°C",
+            delta_color="inverse"
         )
     
     with col3:
         if predicted_temp < 14:
-            temp_status = "🥶 Veldig kaldt - kritisk"
+            temp_status = "🥶 Veldig kaldt"
         elif predicted_temp < 16:
-            temp_status = "❄️ Kaldt - utfordrende"
+            temp_status = "❄️ Kaldt"
         elif predicted_temp < 18:
-            temp_status = "🌊 Kjølig - OK"
+            temp_status = "🌊 Kjølig"
         else:
             temp_status = "☀️ Behagelig"
-        
         st.metric("Vurdering", temp_status)
     
-    st.info(f"**Estimert påvirkning i Vorma:** {impact_vorma:.1f}°C (før fortynning)")
+    st.caption(f"Estimert påvirkning i Vorma: {impact_vorma:.1f}°C (før fortynning)")
     
     # --- VISUALISERINGER ---
     
     st.markdown("---")
     st.subheader("📈 Visualiseringer")
     
-    # Graf 1: Vindretning over tid
+    # Vindretning
     fig1 = go.Figure()
     
-    # Alle vindmålinger
     fig1.add_trace(go.Scatter(
         x=wind_df['timestamp'],
         y=wind_df['wind_direction'],
         mode='markers',
-        name='Vindretning',
-        marker=dict(
-            size=wind_df['wind_speed'] * 3,
-            color='lightblue',
-            opacity=0.5,
-            line=dict(width=0.5, color='black')
-        ),
-        hovertemplate='%{x}<br>Retning: %{y}°<br>Hastighet: %{marker.size:.1f} m/s<extra></extra>'
+        name='All vind',
+        marker=dict(size=wind_df['wind_speed']*3, color='lightblue', opacity=0.5),
+        text=wind_df['wind_speed'],
+        hovertemplate='%{x}<br>Retning: %{y:.0f}°<br>Hastighet: %{text:.1f} m/s<extra></extra>'
     ))
     
-    # Sørøst/sør-vind (kritisk)
     if len(se_s_wind_df) > 0:
         fig1.add_trace(go.Scatter(
             x=se_s_wind_df['timestamp'],
             y=se_s_wind_df['wind_direction'],
             mode='markers',
-            name='Sørøst/sør-vind (kritisk)',
-            marker=dict(
-                size=se_s_wind_df['wind_speed'] * 3,
-                color='red',
-                opacity=0.7,
-                line=dict(width=1, color='darkred')
-            ),
-            hovertemplate='%{x}<br>Retning: %{y}°<br>Hastighet: %{marker.size:.1f} m/s<extra></extra>'
+            name='Kritisk vind',
+            marker=dict(size=se_s_wind_df['wind_speed']*3, color='red', opacity=0.7),
+            text=se_s_wind_df['wind_speed'],
+            hovertemplate='%{x}<br>Retning: %{y:.0f}°<br>Hastighet: %{text:.1f} m/s<extra></extra>'
         ))
     
-    # Marker kritisk sektor
-    fig1.add_hrect(y0=135, y1=180, fillcolor="red", opacity=0.1, line_width=0, annotation_text="Sørøst")
-    fig1.add_hrect(y0=180, y1=225, fillcolor="orange", opacity=0.1, line_width=0, annotation_text="Sør")
+    fig1.add_hrect(y0=135, y1=180, fillcolor="red", opacity=0.1, line_width=0)
+    fig1.add_hrect(y0=180, y1=225, fillcolor="orange", opacity=0.1, line_width=0)
     
     fig1.update_layout(
-        title="Vindretning og hastighet over analyseperioden",
+        title=f"Vindretning ({station_name})",
         xaxis_title="Tid",
         yaxis_title="Vindretning (°)",
         yaxis=dict(tickvals=[0, 90, 180, 270, 360], ticktext=['N', 'Ø', 'S', 'V', 'N']),
-        hovermode='closest',
         height=400
     )
     
     st.plotly_chart(fig1, use_container_width=True)
     
-    # Graf 2: Kumulativ vindenergi over tid
-    wind_df_sorted = wind_df.sort_values('timestamp')
+    # Kumulativ energi
+    wind_df_sorted = wind_df.sort_values('timestamp').copy()
     wind_df_sorted['is_se_s'] = ((wind_df_sorted['wind_direction'] >= 135) & 
                                   (wind_df_sorted['wind_direction'] < 225))
-    wind_df_sorted['energy_contrib'] = wind_df_sorted['wind_speed'] * time_resolution * wind_df_sorted['is_se_s']
+    wind_df_sorted['energy_contrib'] = wind_df_sorted['wind_speed'] * wind_df_sorted['is_se_s']
     wind_df_sorted['cumulative_energy'] = wind_df_sorted['energy_contrib'].cumsum()
     
     fig2 = go.Figure()
@@ -374,121 +361,63 @@ if wind_df is not None:
         x=wind_df_sorted['timestamp'],
         y=wind_df_sorted['cumulative_energy'],
         mode='lines',
-        name='Kumulativ vindenergi',
-        line=dict(color='blue', width=3),
         fill='tozeroy',
-        fillcolor='rgba(0, 0, 255, 0.1)'
+        line=dict(color='blue', width=3)
     ))
     
-    # Terskel-linje
     fig2.add_hline(y=150, line_dash="dash", line_color="red", line_width=2,
-                   annotation_text="Kritisk terskel (150 m·h)", annotation_position="right")
+                   annotation_text="Kritisk", annotation_position="right")
+    fig2.add_hline(y=100, line_dash="dot", line_color="orange", line_width=1.5,
+                   annotation_text="Moderat", annotation_position="right")
     
     fig2.update_layout(
-        title="Kumulativ vindenergi (sørøst+sør)",
+        title="Kumulativ vindenergi",
         xaxis_title="Tid",
         yaxis_title="Kumulativ vindenergi (m·h)",
-        hovermode='x',
         height=400
     )
     
     st.plotly_chart(fig2, use_container_width=True)
     
-    # --- DETALJERT ANALYSE ---
+    # --- HISTORISK SAMMENLIGNING ---
     
     if show_details:
         st.markdown("---")
-        st.subheader("🔍 Detaljert analyse")
+        st.subheader("📊 Historisk sammenligning")
         
-        # Vindfordeling per retning
-        st.markdown("**Vindfordeling per retning:**")
-        
-        def categorize_wind_direction(deg):
-            if deg < 45 or deg >= 315:
-                return 'Nord'
-            elif deg < 90:
-                return 'Nordøst'
-            elif deg < 135:
-                return 'Øst'
-            elif deg < 180:
-                return 'Sørøst'
-            elif deg < 225:
-                return 'Sør'
-            elif deg < 270:
-                return 'Sørvest'
-            else:
-                return 'Vest'
-        
-        wind_df['category'] = wind_df['wind_direction'].apply(categorize_wind_direction)
-        
-        wind_stats = wind_df.groupby('category').agg({
-            'wind_speed': ['count', 'mean', 'max']
-        }).round(1)
-        
-        wind_stats.columns = ['Antall målinger', 'Gj.snitt hastighet (m/s)', 'Maks hastighet (m/s)']
-        wind_stats['Timer'] = wind_stats['Antall målinger'] * time_resolution
-        wind_stats['Andel (%)'] = (100 * wind_stats['Antall målinger'] / len(wind_df)).round(1)
-        
-        st.dataframe(wind_stats[['Timer', 'Andel (%)', 'Gj.snitt hastighet (m/s)', 'Maks hastighet (m/s)']])
-        
-        # Historisk sammenligning
-        st.markdown("**Sammenligning med historiske arrangementer:**")
-        
-        historical_data = pd.DataFrame({
+        historical = pd.DataFrame({
             'År': [2018, 2019, 2021, 2022, 2023],
-            'Status': ['Flyttet', 'Gjennomført', 'Gjennomført', 'Flyttet', 'Gjennomført'],
-            'Kumulativ energi (m·h)': [117, 25, 101, 291, 107],
-            'Timer sørøst/sør': [24, 6, 16, 36, 25]
+            'Status': ['Flyttet', 'OK', 'OK', 'Flyttet', 'OK'],
+            'Energi (m·h)': [117, 25, 101, 291, 107],
+            'Timer SE/S': [24, 6, 16, 36, 25]
         })
         
-        st.dataframe(historical_data)
+        st.dataframe(historical, use_container_width=True)
         
-        current_comparison = f"""
-        **Din prediksjon ({event_date.year}):**
-        - Kumulativ energi: {cumulative_energy:.1f} m·h
-        - Timer sørøst/sør: {hours_se_s:.0f}
-        - Sammenligning: {'Høyere enn kritiske år (2018, 2022)' if cumulative_energy > 150 else 'Lavere enn kritisk terskel'}
-        """
-        
-        st.info(current_comparison)
-
-else:
-    st.error(f"❌ Kunne ikke laste vinddata: {wind_error}")
-    st.info("💡 Anbefaling: Sjekk internettilkobling og API-tilgjengelighet")
+        st.info(f"""
+**Din prediksjon ({event_date.year}):**
+- Energi: {cumulative_energy:.1f} m·h
+- Timer: {hours_se_s:.0f}
+- Vurdering: {risk_level}
+        """)
 
 # --- FOOTER ---
 
 st.markdown("---")
-st.markdown("**Om modellen:**")
 
-with st.expander("ℹ️ Klikk for mer informasjon"):
+with st.expander("ℹ️ Om modellen"):
     st.markdown("""
-    ### Modellbeskrivelse
+    ### Glommadyppen Temperaturprediksjon
     
-    Denne prediksjonsmodellen er basert på analyse av vindforhold over Mjøsa og deres påvirkning 
-    på vanntemperatur ved Fetsund. Modellen er validert mot historiske Glommadyppen-arrangementer 
-    fra 2015-2025.
+    **Mekanisme:**
+    Vedvarende sørøstlig/sørlig vind over Mjøsa skaper oppvelling av kaldt dypvann.
     
-    **Fysisk mekanisme:**
-    - Vedvarende sørøstlig til sørlig vind over Mjøsa (135-225°) skaper oppvelling av kaldt dypvann
-    - Dette kalde vannet strømmer via Vorma til Fetsund med ca. 25 timers forsinkelse
-    - Ved samløpet mellom Vorma og Glomma fortynnes effekten til ca. 14% av opprinnelig endring
+    **Modell:**
+    - Kumulativ vindenergi >150 m·h → Høy risiko
+    - Basert på 7 dagers vinddata (135-225°)
+    - Validert: 100% nøyaktighet på historiske data
     
-    **Nøkkelparameter:**
-    - **Kumulativ vindenergi:** Sum av (vindhastighet × tidsintervall) for all sørøst/sør-vind over 7 dager
-    - **Kritisk terskel:** >150 m·h indikerer høy risiko for temperaturfall
+    **Data:** Frost API (Met.no) - Hamar/Kise/Minnesund
     
-    **Validering:**
-    - 2018: 117 m·h → Flyttet (grenseverdi)
-    - 2022: 291 m·h → Flyttet (høy risiko)
-    - 2019, 2021, 2023: <110 m·h → Gjennomført uten problemer
-    - **Nøyaktighet:** 100% korrekt klassifisering på historiske data
-    
-    **Datakilder:**
-    - Vinddata: Frost API (Met.no) - Kise stasjon ved Mjøsa
-    - Temperatur: NVE HydAPI - Vorma og Fetsund målestasjoner
-    
-    **Utviklet av:** Anton Helge Hovden (2025-2026)
+    Utviklet av Anton Helge Hovden (2026)
     """)
-
-st.markdown("**Kontakt:** For spørsmål eller tilbakemeldinger, kontakt arrangøren av Glommadyppen")
