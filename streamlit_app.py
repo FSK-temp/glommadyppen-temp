@@ -175,7 +175,7 @@ with st.spinner("Laster værvarsel fra Met.no..."):
 
 if forecast_df is None:
     st.error(f"❌ Kunne ikke hente værvarsel: {error}")
-    st.info("💡 Sjekk internettforbindelse eller prøv igjen senere")
+    st.info("Sjekk internettforbindelse eller prøv igjen senere")
     st.stop()
 
 st.success(f"✓ Værvarsel lastet: {len(forecast_df)} tidspunkter")
