@@ -74,6 +74,9 @@ EVENT_YEAR        = 2026
 EVENT_MONTH       = 8
 EVENT_DAY_OF_WEEK = 5   # Lørdag (0=mandag)
 
+#-- Bilde ---
+GD_header = Image.open("Samensatt_logo_GlommDyppen.jpg")
+
 # ============================================================================
 # DATA FETCHING
 # ============================================================================
@@ -690,7 +693,7 @@ def page_prediksjon():
         """, unsafe_allow_html=True)
 
         # Regler-detaljer
-        with st.expander("Vis risikovurdering og Open Water-regler", expanded=False):
+        with st.expander("Vis risikovurdering og Open Water-regler (draft)", expanded=False):
             for d in risk_details:
                 st.markdown(f"- {d}")
             st.markdown("---")
@@ -970,7 +973,7 @@ def page_data_varsel():
 
 def main():
     with st.sidebar:
-        st.image("https://via.placeholder.com/200x60?text=Glommadyppen", use_container_width=True)
+        st.image(GD_header, use_container_width=True)
         st.markdown("---")
         page = st.radio(
             "Navigasjon",
