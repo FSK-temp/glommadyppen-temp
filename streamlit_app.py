@@ -581,10 +581,10 @@ def page_prediksjon():
     st.divider()
 
     with st.spinner("Henter data…"):
-        vorma_temp        = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1001, hours_back=168)
-        svanefoss_temp    = fetch_nve_data(STATION_SVANEFOSS,      1001, hours_back=168)
-        blaker_temp       = fetch_nve_data(STATION_BLAKER,         1001, hours_back=168)
-        fetsund_temp      = fetch_nve_data(STATION_FETSUND,        1001, hours_back=168)
+        vorma_temp        = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=168)
+        svanefoss_temp    = fetch_nve_data(STATION_SVANEFOSS,      1003, hours_back=168)
+        blaker_temp       = fetch_nve_data(STATION_BLAKER,         1003, hours_back=168)
+        fetsund_temp      = fetch_nve_data(STATION_FETSUND,        1003, hours_back=168)
         weather_mjosa     = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON)
         if not weather_mjosa.empty:
             weather_mjosa = add_southerly_component(weather_mjosa)
