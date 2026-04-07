@@ -80,7 +80,7 @@ EVENT_DAY_OF_WEEK = 5   # Lørdag (0=mandag)
 
 @st.cache_data(ttl=3600)
 def fetch_nve_data(station_id, parameter, hours_back=168):
-    """Henter data fra NVE HydAPI. Parameter 1001=temp, 1000=vannføring."""
+    """Henter data fra NVE HydAPI. Parameter 1003=temp, 1001=vannføring."""
     try:
         url = f"{NVE_BASE_URL}/Observations"
         headers = {"X-API-Key": NVE_API_KEY, "accept": "application/json"} if NVE_API_KEY else {"accept": "application/json"}
@@ -778,10 +778,10 @@ def page_data_varsel():
 
     # ── Felles datahenting ────────────────────────────────────────────────────
     with st.spinner("Henter observasjoner…"):
-        sv_temp   = fetch_nve_data(STATION_SVANEFOSS,      1001, hours_back=168)
-        fn_temp   = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1001, hours_back=168)
-        bl_temp   = fetch_nve_data(STATION_BLAKER,         1001, hours_back=168)
-        fe_temp   = fetch_nve_data(STATION_FETSUND,        1001, hours_back=168)
+        sv_temp   = fetch_nve_data(STATION_SVANEFOSS,      1003, hours_back=168)
+        fn_temp   = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=168)
+        bl_temp   = fetch_nve_data(STATION_BLAKER,         1003, hours_back=168)
+        fe_temp   = fetch_nve_data(STATION_FETSUND,        1003, hours_back=168)
         er_q      = fetch_nve_data(STATION_ERTESEKKEN_Q,   1001, hours_back=168)
         bl_q      = fetch_nve_data(STATION_BLAKER,         1001, hours_back=168)
         fn_q      = fetch_nve_data(STATION_FUNNEFOSS_Q,    1001, hours_back=168)
