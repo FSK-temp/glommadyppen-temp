@@ -568,8 +568,8 @@ def _daily_forecast_table(df, days=10):
 # ============================================================================
 
 def page_prediksjon():
-    st.title("🔮 Temperaturprediksjon")
-    st.markdown("Predikert vanntemperatur ved Fetsund basert på målinger i Vorma og transporttidsmodellen.")
+    st.title("Temperaturprediksjon")
+    st.markdown("Predikert vanntemperatur under Glommadyppen basert på observasjoner i Mjøsa, Vorma og Glomma")
 
     event_date  = calculate_event_date(EVENT_YEAR)
     days_until  = (event_date - pd.Timestamp.now(tz='UTC')).days
@@ -621,7 +621,7 @@ def page_prediksjon():
         st.warning(f"⚠️ Siste Vorma-måling er {data_age_days:.1f} dager gammel – stasjonen kan være offline.")
 
     # ── Nåstatus ─────────────────────────────────────────────────────────────
-    st.header("📊 Nåværende status")
+    st.header("Nåværende status")
     c1, c2, c3, c4 = st.columns(4)
 
     latest_val = primary_df.iloc[-1]['value']
@@ -652,7 +652,7 @@ def page_prediksjon():
     st.divider()
 
     # ── Prediksjon ────────────────────────────────────────────────────────────
-    st.header("🎯 Prediksjon for arrangementet")
+    st.header("Prediksjon for arrangementet")
     prediction = predict_fetsund_temperature(
         primary_df.rename(columns={'value': 'value'}) if 'value' in primary_df.columns else primary_df,
         event_date
@@ -723,14 +723,14 @@ def page_prediksjon():
 
         Modell: 25 t transporttid · 14 % fortynningsoverlevelse · {len(primary_df)} målinger
         """)
-        st.warning("⚠️ Modellen er validert på julidata og augustdata. Bruk med forsiktighet utenfor sommermånedene.")
+        st.warning("⚠️ Modellen er validert opp mot data fra juli og august. Bruk med forsiktighet utenfor sommermånedene.")
     else:
         st.warning("⚠️ Ikke nok data for prediksjon.")
 
     st.divider()
 
     # ── Temperaturhistorikk ───────────────────────────────────────────────────
-    st.subheader("📈 Temperaturhistorikk – siste 7 dager")
+    st.subheader("Temperaturhistorikk – siste 7 dager")
     temp_fig = _temp_chart({
         'Svanefoss': svanefoss_temp,
         'Blaker':    blaker_temp,
@@ -741,7 +741,7 @@ def page_prediksjon():
     # ── Vindanalyse ───────────────────────────────────────────────────────────
     if not weather_mjosa.empty:
         st.divider()
-        st.subheader("💨 Vindvarsel – Mjøsa (5 dager)")
+        st.subheader("Vindvarsel – Mjøsa (5 dager)")
 
         next_48h  = weather_mjosa.head(48)
         avg_wind  = next_48h['wind_speed'].mean()
@@ -767,16 +767,16 @@ def page_prediksjon():
 # ============================================================================
 
 def page_data_varsel():
-    st.title("📊 Observasjoner og Værvarsler")
+    st.title("Observasjoner og Værvarsler")
     st.markdown(
-        "Faktiske målinger fra NVE og met.no — ingen prediksjonsmodell. "
+        "Faktiske målinger fra NVE og met.no"
         "Bruk denne siden for å se rå data og standard værvarsler."
     )
 
     tabs = st.tabs([
         "🌊 NVE Vanntemperatur",
         "💧 NVE Vannføring",
-        "🌬️ Vind ved Mjøsa (obs)",
+        "🌬️ Vind ved Mjøsa",
         "🌤️ Værvarsler",
     ])
 
@@ -798,7 +798,7 @@ def page_data_varsel():
     # ────────────────────────────────────────────────────────────────────────
     with tabs[0]:
         st.subheader("Vanntemperatur – siste 7 dager (NVE HydAPI)")
-        st.caption("Timesverdier fra stasjonene langs Vorma og Glomma. Kvalitetskodene 1–2 vises.")
+        st.caption("Timesverdier fra stasjonene langs Vorma og Glomma. Bare data med de to høyeste kvalitetene vises.")
 
         # Nåverdier
         c1, c2, c3, c4 = st.columns(4)
@@ -810,7 +810,7 @@ def page_data_varsel():
         _latest(sv_temp, "Svanefoss (Vorma)", c1)
         _latest(fn_temp, "Funnefoss (Vorma)", c2)
         _latest(bl_temp, "Blaker (Glomma)",   c3)
-        _latest(fe_temp, "Fetsund",            c4)
+        _latest(fe_temp, "Fetsund (Glomma)",  c4)
 
         fig = _temp_chart({
             'Svanefoss': sv_temp,
@@ -822,10 +822,10 @@ def page_data_varsel():
 
         st.caption("""
         **Stasjoner:**  
-        - **Svanefoss** (2.52.0) — Vorma, 22 km fra Mjøsa. Upstream-referanse for oppvellingsdeteksjon.  
-        - **Funnefoss** (2.410.0) — Vorma ca. 23,5 km fra Mjøsa.  
-        - **Blaker** (2.17.0) — Glomma, primær valideringsstasjon (99,9 % gyldige målinger).  
-        - **Fetsund** (2.587.0) — Arrangementspunkt / målgang.
+        - **Svanefoss** (2.52.0) — i Vorma, 22 km fra Mjøsa.  
+        - **Funnefoss** (2.410.0) — i Vorma ca. 23,5 km fra Mjøsa.  
+        - **Blaker** (2.17.0) — i Glomma, primær målestasjon.  
+        - **Fetsund** (2.587.0) — Målgang Glommadyppen.
         """)
 
     # ────────────────────────────────────────────────────────────────────────
@@ -833,7 +833,7 @@ def page_data_varsel():
     # ────────────────────────────────────────────────────────────────────────
     with tabs[1]:
         st.subheader("Vannføring – siste 7 dager (NVE HydAPI)")
-        st.caption("Timesverdier i m³/s. Ertesekken-verdien brukes i transporttidsformelen t = 9700/Q.")
+        st.caption("Timesverdier i m³/s. Vannføring forbi Ertesekken brukes for å finne ut tiden det tar før kaldt vann når arrangementet")
 
         c1, c2, c3 = st.columns(3)
         def _latest_q(df, label, col):
@@ -856,7 +856,7 @@ def page_data_varsel():
         st.plotly_chart(fig, use_container_width=True)
 
         # Transport-kalkulator
-        st.subheader("🧮 Transporttid-kalkulator")
+        st.subheader("Transporttid-kalkulator")
         if not er_q.empty:
             q_now = er_q.iloc[-1]['value']
         else:
@@ -867,7 +867,7 @@ def page_data_varsel():
         t_calc = round(9700 / q_val, 1)
         st.info(f"""
         **t = 9700 / {q_val} = {t_calc} timer** (Svanefoss → Fetsund, 45 km)
-        *(t = 6871/Q for Svanefoss→Blaker, R² = 0,73, n = 19 episoder)*
+        *(t = 6871/Q for Svanefoss→Blaker)*
         """)
 
         st.caption("""
@@ -978,26 +978,26 @@ def main():
         st.markdown("---")
         page = st.radio(
             "Navigasjon",
-            options=["🔮 Prediksjon", "📊 Data & Varsel"],
+            options=["Prediksjon", "Observasjoner og værvarsel"],
             label_visibility="collapsed",
         )
         st.markdown("---")
         st.markdown("""
         **Modell**
-        - t = 9700/Q (transporttid)
-        - 14 % fortynningsoverlevelse
-        - Validert 2018–2025 (n=19)
+        - Transporttid = 9700/Q
+        - Fortynning av Vorma: 14 %
+        - Validert med data fra 2018–2025
 
-        **Open Water-grenser**
-        - < 16 °C: Obligatorisk våtdrakt
+        **Open Water-grenser for våtdrakt**
+        - < 16 °C: Obligatorisk
         - 16–18 °C: Sterkt anbefalt
         - 18–20 °C: Anbefalt
         - > 20 °C: Valgfritt
 
         **Datakilder**
         - NVE HydAPI (vann)
-        - MET Frost API (vind obs)
-        - Met.no Locationforecast (varsel)
+        - MET Frost API (vind)
+        - Met.no Locationforecast (værvarsel)
         """)
         st.markdown("---")
         if st.button("🔄 Oppdater data"):
@@ -1005,10 +1005,10 @@ def main():
             st.rerun()
         st.caption(
             f"Oppdatert {pd.Timestamp.now(tz='Europe/Oslo').strftime('%d.%m.%Y %H:%M')} | "
-            "Utviklet av Anton"
+            "Utviklet av Fet Svømmeklubb for Glommadyppen.no"
         )
 
-    if page == "🔮 Prediksjon":
+    if page == "Prediksjon":
         page_prediksjon()
     else:
         page_data_varsel()
