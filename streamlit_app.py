@@ -2,8 +2,8 @@
 Glommadyppen Vanntemperatur Prediksjon
 Real-time water temperature prediction for Glommadyppen swimming event
 
-Author: Anton
-Date: 2025 / updated 2026
+Author: Anton Vooren
+Date: 2026
 """
 
 import streamlit as st
@@ -880,8 +880,6 @@ def page_data_varsel():
         st.subheader("Vindmålinger – Kise, søndre Mjøsa (siste 7 dager)")
         st.caption(
             f"Kilde: MET.no Frost API · Stasjon {FROST_STATION_KISE} (Kise) · Timesverdier. "
-            "Merk: CERRA-reanalysen som ble brukt i forskningsrapporten har typisk 2–3 måneders "
-            "forsinkelse og egner seg ikke til sanntidsovervåking."
         )
 
         if frost_vind.empty:
@@ -962,8 +960,7 @@ def page_data_varsel():
         st.info("""
         **Om oppvellings-indikatoren (SE/S-vind):**  
         🟢 Lav risiko (< 1,2 m/s) · 🟡 Moderat (1,2–1,9 m/s) · 🔴 Høy (≥ 1,9 m/s vedvarende SE/S-vind)  
-        Vind fra sektor 135–225° (sørøst–sør) er kritisk fordi den kan utløse Ekman-transport og oppvelling
-        av kaldt hypolimnion-vann fra Mjøsa.
+        Vind over tid fra sørøst–sør (135–225°) kan føre til kaldt vann fra Mjøsa til Glomma.
         """)
 
 
