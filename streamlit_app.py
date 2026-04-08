@@ -186,7 +186,7 @@ def fetch_frost_wind(hours_back=168):
 def fetch_weather_forecast(lat, lon, days_ahead=14):
     """Henter varsel fra Met.no Locationforecast (opp til ~10 dager med timesoppløsning)."""
     try:
-        url     = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+        url     = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
         headers = {"User-Agent": "GlommadyppenApp/1.0 kontakt@glommadyppen.no"}
         params  = {"lat": lat, "lon": lon}
 
@@ -202,12 +202,19 @@ def fetch_weather_forecast(lat, lon, days_ahead=14):
             if t > max_time:
                 break
             details = ts['data']['instant']['details']
+            # Nedbør hentes fra next_1_hours eller next_6_hours
+            precip = None
+            for window in ('next_1_hours', 'next_6_hours'):
+                if window in ts['data']:
+                    precip = ts['data'][window].get('details', {}).get('precipitation_amount')
+                    break
             forecast_list.append({
                 'time':            t,
                 'air_temperature': details.get('air_temperature'),
                 'wind_speed':      details.get('wind_speed'),
                 'wind_direction':  details.get('wind_from_direction'),
                 'wind_gust':       details.get('wind_speed_of_gust'),
+                'precipitation':   precip,
             })
 
         return pd.DataFrame(forecast_list)
@@ -591,6 +598,155 @@ def _daily_forecast_table(df, days=10):
     return pd.DataFrame(rows)
 
 
+def _daily_forecast_table_fetsund(df, days=10):
+    """
+    Daglig sammendragstabell for Fetsund lenser – viser vær relevant for
+    arrangementet: temperatur, vind, nedbør. Ingen oppvellings-analyse
+    (SE/S-vind er ikke relevant her).
+    """
+    if df.empty:
+        return None
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['time']).dt.tz_convert('Europe/Oslo').dt.date
+    rows = []
+    for date in sorted(df['date'].unique())[:days]:
+        d = df[df['date'] == date]
+        precip_sum = d['precipitation'].sum() if 'precipitation' in d.columns else None
+        precip_str = f"{precip_sum:.1f} mm" if precip_sum is not None else "–"
+        rows.append({
+            'Dato':          pd.to_datetime(date).strftime('%a %d.%m'),
+            'Lufttemp':      f"{d['air_temperature'].min():.0f}–{d['air_temperature'].max():.0f} °C",
+            'Vind gj.snitt': f"{d['wind_speed'].mean():.1f} m/s",
+            'Vind maks':     f"{d['wind_speed'].max():.1f} m/s",
+            'Nedbør':        precip_str,
+        })
+    return pd.DataFrame(rows)
+
+
+def _weather_fetsund_chart(df, title="Værvarsler – Fetsund"):
+    """Enkel kombinert graf: lufttemperatur + vind + nedbør for Fetsund."""
+    if df.empty or 'wind_speed' not in df.columns:
+        return None
+    fig = make_subplots(
+        rows=3, cols=1, vertical_spacing=0.10,
+        subplot_titles=('Lufttemperatur (°C)', 'Vindhastighet (m/s)', 'Nedbør (mm/t)')
+    )
+    fig.add_trace(go.Scatter(
+        x=df['time'], y=df['air_temperature'], mode='lines', name='Lufttemp',
+        line=dict(color='#E67E22', width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df['time'], y=df['wind_speed'], mode='lines', name='Vind',
+        line=dict(color='#2E86AB', width=1.5), fill='tozeroy',
+        fillcolor='rgba(46,134,171,0.12)'), row=2, col=1)
+    if 'precipitation' in df.columns:
+        fig.add_trace(go.Bar(
+            x=df['time'], y=df['precipitation'], name='Nedbør',
+            marker_color='rgba(70,130,180,0.6)'), row=3, col=1)
+    fig.update_layout(title=title, height=520, showlegend=False, **_LAYOUT_BASE)
+    return fig
+
+
+# ============================================================================
+# PAGE: INFORMASJON
+# ============================================================================
+
+def page_informasjon():
+    st.title("Om Glommadyppen Temperaturvarsel")
+
+    st.markdown("""
+    Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
+    langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
+    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
+
+    Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
+    planlegge arrangement og treningsturer.
+    """)
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("🌊 Hvorfor varierer temperaturen?")
+        st.markdown("""
+        Kaldt vann fra Mjøsas dyplag kan nå Glomma ved Fetsund gjennom en kjede av hendelser:
+
+        1. **Sørøst/sør-vind** over Mjøsa skaper Ekman-transport som presser overflatevann
+           mot nordenden av innsjøen og drar kaldt bunnvann (hypolimnion) opp i sør.
+        2. Det kalde vannet strømmer ut i **Vorma ved Minnesund** og transporteres
+           sørover i elven.
+        3. Etter **ca. 25 timer** (ved typisk augustvannføring) når det kalde vannet
+           **samløpet med Glomma** nedenfor Funnefoss.
+        4. Her blandes det med Glomma-vannet: bare **~14 %** av temperaturavviket
+           overlever fortynningen og når Fetsund.
+
+        Effekten kan likevel gi temperaturfall på 3–5 °C ved arrangementet i år med
+        kraftig og vedvarende sørlig vind.
+        """)
+
+    with col2:
+        st.subheader("📡 Datakilder")
+        st.markdown("""
+        **NVE HydAPI** – timesverdier for vanntemperatur og vannføring:
+        - Svanefoss (2.52.0) — Vorma, 22 km fra Mjøsa
+        - Funnefoss (2.410.0) — Vorma, 23,5 km fra Mjøsa
+        - Ertesekken (2.197.0) — Vorma, vannføring (brukes i transporttidsmodellen)
+        - Blaker (2.17.0) — Glomma, nedenfor samløpet
+        - Fetsund (2.587.0) — Målgang / arrangementspunkt
+
+        **MET Frost API** – historiske vindmålinger fra Kise (SN12680) ved søndre Mjøsa.
+
+        **Met.no Locationforecast 2.0** – værvarsler for Mjøsa og Fetsund lenser,
+        oppdateres ca. hver time.
+        """)
+
+    st.divider()
+
+    st.subheader("🔮 Hva betyr prediksjonen – og når er den pålitelig?")
+    st.markdown("""
+    Prediksjonsmodellen beregner forventet vanntemperatur ved Fetsund basert på
+    **aktuelle målinger i Vorma** og transporttidsformelen **t = 9700 / Q** (timer).
+    """)
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("""
+        **Prediksjonen er pålitelig når:**
+        - Det er aktive målinger fra Svanefoss eller Funnefoss (april–september)
+        - Du ønsker å vite omtrent hva temperaturen er ved Fetsund **i dag eller i morgen**
+          – for eksempel for en treningstur langs arrangementsdistansen
+        - Det er innen **1–2 uker** før Glommadyppen
+        """)
+    with col4:
+        st.markdown("""
+        **Prediksjonen er *ikke* en langtidsprognose:**
+        - Mange måneder før arrangementet reflekterer prediksjonen kun **nåværende
+          forhold**, ikke hva som vil skje i august
+        - Prediksjonen bør tolkes som *«slik er det nå»*, ikke *«slik blir det
+          under Glommadyppen»* dersom det er langt til arrangement
+        - Usikkerheten i prediksjonen er ±2–3 °C (95 % KI)
+        """)
+
+    st.divider()
+
+    st.subheader("🏊 Våtdrakt-regler (World Aquatics / FINA)")
+    st.markdown("""
+    | Temperatur | Vurdering | Våtdrakt |
+    |---|---|---|
+    | < 14 °C | Arrangement bør avlyses | Ikke aktuelt |
+    | 14–16 °C | Høy risiko – vurder avlysning | Obligatorisk |
+    | 16–18 °C | Moderat risiko | Sterkt anbefalt |
+    | 18–20 °C | Lav risiko | Anbefalt |
+    | 20–24 °C | Gode forhold | Valgfritt |
+    | > 24 °C | Varmt vann | Frarådes |
+
+    Disse grensene gjelder internasjonale konkurranser i åpent vann. Arrangøren
+    kan sette strengere krav, og individuelle deltakere bør vurdere egen erfaring
+    og toleranse for kaldt vann uavhengig av regelverket.
+    """)
+
+
 # ============================================================================
 # PAGE: PREDIKSJON
 # ============================================================================
@@ -678,6 +834,33 @@ def page_prediksjon():
 
     # ── Prediksjon ────────────────────────────────────────────────────────────
     st.header("Prediksjon for arrangementet")
+
+    # Beregn prediksjonsvindu og vis tydelig hvilken periode som gjelder
+    travel_hours_now, q_now_pred, _ = calculate_travel_time(ertesekken_q)
+    pred_valid_from = pd.Timestamp.now(tz='UTC')
+    pred_valid_to   = pred_valid_from + pd.Timedelta(hours=travel_hours_now)
+    pred_from_oslo  = pred_valid_from.tz_convert('Europe/Oslo')
+    pred_to_oslo    = pred_valid_to.tz_convert('Europe/Oslo')
+
+    if days_until > 14:
+        st.info(f"""
+        ℹ️ **Prediksjonen viser nåværende forhold – ikke en prognose for august**
+
+        Prediksjonen er basert på Vorma-målinger fra **nå**, og reflekterer forventet
+        temperatur ved Fetsund i løpet av de neste **{travel_hours_now:.0f} timene**
+        (dvs. frem til ca. {pred_to_oslo.strftime('%d.%m kl %H:%M')}).
+
+        Det er {days_until} dager til Glommadyppen ({oslo_dt.strftime('%-d. %B %Y')}).
+        Prediksjonen for selve arrangementsdagen vil først være meningsfull
+        ca. **1–2 uker før** arrangementet.
+        """)
+    else:
+        st.success(f"""
+        ✅ **Prediksjon for arrangementet** er nå aktiv ({days_until} dager igjen).
+        Prediksjonen er basert på Vorma-temperaturen {travel_hours_now:.0f} timer
+        før arrangementet ({oslo_dt.strftime('%-d. %B kl %H:%M')}).
+        """)
+
     prediction = predict_fetsund_temperature(primary_df, ertesekken_q, event_date)
 
     if data_age_days > 30 and days_until > 30:
@@ -693,7 +876,7 @@ def page_prediksjon():
         st.markdown(f"""
         <div style='background:{risk_color}; padding:20px; border-radius:12px;
                     color:white; text-align:center; margin-bottom:16px;'>
-          <div style='font-size:0.95em; opacity:0.9; margin-bottom:4px;'>
+          <div style='font-size:0.85em; opacity:0.8; margin-bottom:2px;'>
             Predikert temperatur ved Fetsund
           </div>
           <div style='font-size:3em; font-weight:700; line-height:1.1;'>
@@ -701,6 +884,11 @@ def page_prediksjon():
           </div>
           <div style='font-size:1.1em; margin-top:8px; font-weight:600;'>
             {risk_label}
+          </div>
+          <div style='font-size:0.8em; opacity:0.85; margin-top:6px;'>
+            Gjelder: {pred_from_oslo.strftime('%-d. %b kl %H:%M')} –
+            {pred_to_oslo.strftime('%-d. %b kl %H:%M')}
+            (neste {travel_hours_now:.0f} timer)
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -949,11 +1137,10 @@ def page_data_varsel():
             if fc_fetsund.empty:
                 st.warning("Varsel ikke tilgjengelig")
             else:
-                fc_fetsund_s = add_southerly_component(fc_fetsund.copy())
-                tbl = _daily_forecast_table(fc_fetsund_s)
+                tbl = _daily_forecast_table_fetsund(fc_fetsund)
                 if tbl is not None:
                     st.dataframe(tbl, use_container_width=True, hide_index=True)
-                chart = _wind_forecast_chart(fc_fetsund_s, "Vindvarsel – Fetsund")
+                chart = _weather_fetsund_chart(fc_fetsund, "Værvarsler – Fetsund lenser")
                 if chart:
                     st.plotly_chart(chart, use_container_width=True)
 
@@ -970,11 +1157,18 @@ def page_data_varsel():
 
 def main():
     with st.sidebar:
-        st.image(GD_header, use_container_width=True)
+        # Klikkbar logo → glommadyppen.no
+        st.markdown(
+            '<a href="https://glommadyppen.no" target="_blank">'
+            + '<img src="data:image/jpeg;base64,{}" style="width:100%;cursor:pointer;">'
+            .format(__import__('base64').b64encode(open('Samensatt_logo_GlommDyppen.jpg','rb').read()).decode())
+            + '</a>',
+            unsafe_allow_html=True
+        )
         st.markdown("---")
         page = st.radio(
             "Navigasjon",
-            options=["Prediksjon", "Observasjoner og værvarsel"],
+            options=["Om siden", "Observasjoner og værvarsel", "Prediksjon"],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -1004,10 +1198,12 @@ def main():
             "Utviklet av Fet Svømmeklubb for Glommadyppen.no"
         )
 
-    if page == "Prediksjon":
-        page_prediksjon()
-    else:
+    if page == "Om siden":
+        page_informasjon()
+    elif page == "Observasjoner og værvarsel":
         page_data_varsel()
+    else:
+        page_prediksjon()
 
 
 if __name__ == "__main__":
