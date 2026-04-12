@@ -654,13 +654,13 @@ def page_informasjon():
     st.title("Om Glommadyppen Temperaturvarsel")
 
     st.markdown("""
-    Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
-    langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
-    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
+    Glommadyppen er et Open Water arrangement fra Bingsfossen til Fetsund lenser
+    langs Glomma, arrangert av Fet Svømmeklubb og Sørumsand IF den første lørdagen i august hvert år.
+    Distansene er 11, 6 og 2 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år og påvirker sikkerheten.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
-    planlegge arrangement og treningsturer.
+    planlegge Glommadyppen og treningsturer i Glomma.
     """)
 
     st.divider()
