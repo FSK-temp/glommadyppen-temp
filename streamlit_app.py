@@ -1088,7 +1088,7 @@ def page_data_varsel():
         st.caption("""
         **Stasjoner:**  
         - **Ertesekken** (2.197.0) — Vorma, nøkkelstasjon for transporttidsmodellen.  
-        - **Funnefoss nedre** (2.279.0) — Glomma, oppstrøms samløp med Vorma.  
+        - **Funnefoss kraftverk** (2.412.0) — Glomma, oppstrøms samløp med Vorma.  
         - **Blaker** (2.17.0) — Glomma, nedenfor samløp (typisk 1,45 × Ertesekken).
         """)
 
