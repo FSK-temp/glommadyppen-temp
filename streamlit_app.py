@@ -118,8 +118,11 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
         end_time   = pd.Timestamp.now(tz='UTC')
         df = df[df['time'] >= end_time - pd.Timedelta(hours=hours_back)]
 
+        # Inkluder ukontrollerte data (quality=0) i tillegg til godkjente (1) og korrigerte (2).
+        # NVE-data blir sjelden etterkontrollert i sanntid, så quality=0 er normalt
+        # for ferske målinger. Fysisk sanity-sjekk nedenfor er tilstrekkelig filter.
         if 'quality' in df.columns:
-            df = df[df['quality'].isin([1, 2])]
+            df = df[df['quality'].isin([0, 1, 2])]
 
         # Fysisk sanity-sjekk: forkast umulige verdier
         # (Svanefoss har kjente sensorfeil med verdier rundt -20 °C med quality=1)
@@ -531,14 +534,17 @@ def _wind_obs_chart(df, title="Vindmålinger"):
     fig.add_hline(y=CRITICAL_WIND_SPEED, line_dash="dot", line_color="red",
                   annotation_text=f"{CRITICAL_WIND_SPEED} m/s terskel", row=1, col=1)
     if 'wind_direction' in df.columns:
+        is_ses_bool = is_ses.values if hasattr(is_ses, 'values') else is_ses
+        marker_colors = ['#D62828' if s else '#AAAAAA' for s in is_ses_bool]
         fig.add_trace(go.Scatter(
             x=df['time'], y=df['wind_direction'], mode='markers', name='Retning',
-            marker=dict(size=4, color=df['wind_direction'],
-                        colorscale='HSV', showscale=False)), row=2, col=1)
+            marker=dict(size=5, color=marker_colors),
+            hovertemplate='%{y:.0f}°<extra></extra>'), row=2, col=1)
         fig.add_hrect(y0=WIND_SECTOR_MIN, y1=WIND_SECTOR_MAX,
                       fillcolor="rgba(214,40,40,0.08)", line_width=0,
-                      annotation_text="Kritisk SE/S", row=2, col=1)
-        fig.update_yaxes(range=[0, 360], row=2, col=1)
+                      annotation_text="Kritisk SE/S (135–225°)", row=2, col=1)
+        fig.update_yaxes(range=[0, 360], tickvals=[0, 90, 180, 270, 360],
+                         ticktext=['N', 'Ø', 'S', 'V', 'N'], row=2, col=1)
     fig.update_layout(title=title, height=500, showlegend=True, **_LAYOUT_BASE)
     return fig
 
@@ -561,14 +567,17 @@ def _wind_forecast_chart(df, title="Vindvarsel"):
     fig.add_hline(y=CRITICAL_WIND_SPEED, line_dash="dot", line_color="red",
                   annotation_text=f"{CRITICAL_WIND_SPEED} m/s terskel", row=1, col=1)
     if 'wind_direction' in df.columns:
+        is_ses = (df['wind_direction'] >= WIND_SECTOR_MIN) & (df['wind_direction'] <= WIND_SECTOR_MAX)
+        marker_colors = ['#D62828' if s else '#AAAAAA' for s in is_ses]
         fig.add_trace(go.Scatter(
             x=df['time'], y=df['wind_direction'], mode='markers', name='Retning',
-            marker=dict(size=4, color=df['wind_direction'],
-                        colorscale='HSV', showscale=False)), row=2, col=1)
+            marker=dict(size=5, color=marker_colors),
+            hovertemplate='%{y:.0f}°<extra></extra>'), row=2, col=1)
         fig.add_hrect(y0=WIND_SECTOR_MIN, y1=WIND_SECTOR_MAX,
                       fillcolor="rgba(214,40,40,0.08)", line_width=0,
-                      annotation_text="Kritisk SE/S", row=2, col=1)
-        fig.update_yaxes(range=[0, 360], row=2, col=1)
+                      annotation_text="Kritisk SE/S (135–225°)", row=2, col=1)
+        fig.update_yaxes(range=[0, 360], tickvals=[0, 90, 180, 270, 360],
+                         ticktext=['N', 'Ø', 'S', 'V', 'N'], row=2, col=1)
     fig.update_layout(title=title, height=500, showlegend=True, **_LAYOUT_BASE)
     return fig
 
@@ -654,13 +663,13 @@ def page_informasjon():
     st.title("Om Glommadyppen Temperaturvarsel")
 
     st.markdown("""
-    Glommadyppen er et Open Water arrangement fra Bingsfossen til Fetsund lenser
-    langs Glomma, arrangert av Fet Svømmeklubb og Sørumsand IF den første lørdagen i august hvert år.
-    Distansene er 11, 6 og 2 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år og påvirker sikkerheten.
+    Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
+    langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
+    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
-    planlegge Glommadyppen og treningsturer i Glomma.
+    planlegge arrangement og treningsturer.
     """)
 
     st.divider()
