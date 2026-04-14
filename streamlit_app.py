@@ -61,7 +61,7 @@ FETSUND_LAT,     FETSUND_LON     = 59.9297, 11.5833  # Mål / Fetsund lenser
 TRANSPORT_COEFF      = 9700     # m / (m³/s) → timer; Svanefoss→Fetsund
 TRANSPORT_COEFF_BLA  = 6871     # m / (m³/s) → timer; Svanefoss→Blaker
 FALLBACK_DISCHARGE   = 437.0    # m³/s – median august; brukes kun hvis Q-data mangler
-TEMPERATURE_SURVIVAL = 0.14     # 14 % av temperaturfall overlever fortynning
+TEMPERATURE_SURVIVAL = 0.14     # 14 % av temperaturfall overlever fortynning og dispersjon
 CRITICAL_WIND_SPEED  = 1.9      # m/s vedvarende sørlig vind for å utløse oppvelling
 WIND_SECTOR_MIN      = 135      # Kritisk vindretning fra (°)
 WIND_SECTOR_MAX      = 225      # Kritisk vindretning til (°)
@@ -301,8 +301,7 @@ def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime):
 
     Transporttid beregnes dynamisk som t = 9700 / Q (Svanefoss → Fetsund),
     der Q er medianen av siste 24 timers målinger ved Ertesekken.
-    14 % av temperaturavviket i Vorma overlever fortynningen ved samløpet
-    med Glomma og når Fetsund.
+    14 % av temperaturavviket i Vorma overlever transport og dispersjon frem til Fetsund.
     """
     if vorma_temp_df.empty:
         return None
@@ -698,7 +697,7 @@ def page_informasjon():
         3. Etter **ca. 25 timer** (ved typisk augustvannføring) når det kalde vannet
            **samløpet med Glomma** nedenfor Funnefoss.
         4. Her blandes det med Glomma-vannet: bare **~14 %** av temperaturavviket
-           overlever fortynningen og når Fetsund.
+           overlever fortynningen/dispersjon og når Fetsund.
 
         Effekten kan likevel gi temperaturfall på 3–5 °C ved arrangementet i år med
         kraftig og vedvarende sørlig vind.
@@ -950,7 +949,7 @@ def page_prediksjon():
         **95 % konfidensintervall:** {pred_temp - margin:.1f} – {pred_temp + margin:.1f} °C
 
         Modell: t = 9700 / {prediction['q_used']:.0f} = **{prediction['travel_hours']} t** transporttid
-        ({prediction['q_source']}) · 14 % fortynningsoverlevelse · {len(primary_df)} målinger
+        ({prediction['q_source']}) · 14 % kaldtvann · {len(primary_df)} målinger
         """)
         st.warning("⚠️ Modellen er validert opp mot data fra juli og august. Bruk med forsiktighet utenfor sommermånedene.")
     else:
@@ -1194,7 +1193,7 @@ def main():
         st.markdown("""
         **Modell**
         - Transporttid = 9700 / Q (dynamisk)
-        - Fortynning av Vorma: 14 %
+        - Innvirkning av temp. i Vorma: 14 %
         - Validert med data fra 2018–2025
 
         **Open Water-grenser for våtdrakt**
