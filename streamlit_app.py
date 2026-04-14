@@ -68,7 +68,7 @@ WIND_SECTOR_MAX      = 225      # Kritisk vindretning til (°)
 
 # ── Open Water temperaturgrenser ─────────────────────────────────────────────
 # Basert på World Aquatics (FINA) OW-regler og norske sikkerhetsterskler
-OW_ABORT            = 14.0   # Under: arrangement bør avlyses
+OW_ABORT            = 14.0   # Under: svømming i Glomma bør ikke gjennomføres
 OW_WETSUIT_REQUIRED = 16.0   # Under: våtdrakt obligatorisk (FINA-minimum)
 OW_WETSUIT_STRONG   = 18.0   # Under: våtdrakt sterkt anbefalt
 OW_WETSUIT_OPTIONAL = 20.0   # Under: våtdrakt anbefalt / valgfritt
@@ -378,18 +378,18 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
     details = []
 
     if predicted_temp < OW_ABORT:
-        label  = "ARRANGEMENT BØR AVLYSES"
+        label  = "Svømming i Glomma bør ikke gjennomføres"
         color  = "#6B0000"
         ws     = "Ikke aktuelt — for kaldt"
         ws_col = "#6B0000"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C er under absolutt minimumsgrense (14 °C).",
             "World Aquatics (FINA) forbyr konkurranser under 16 °C.",
-            "Hypotermirisiko er ekstremt høy — arrangementet bør avlyses.",
+            "Hypotermirisiko er ekstremt høy — svømming bør ikke gjennomføres.",
         ]
 
     elif predicted_temp < OW_WETSUIT_REQUIRED:
-        label  = "HØY RISIKO – VURDER AVLYSNING"
+        label  = "Høy risiko – vurder svømming nøye"
         color  = "#dc3545"
         ws     = "Våtdrakt obligatorisk"
         ws_col = "#dc3545"
@@ -753,7 +753,7 @@ def page_informasjon():
     st.markdown("""
     | Temperatur | Vurdering | Våtdrakt |
     |---|---|---|
-    | < 14 °C | Arrangement bør avlyses | Ikke aktuelt |
+    | < 14 °C | Svømming bør ikke gjennomføres | Ikke aktuelt |
     | 14–16 °C | Høy risiko – vurder avlysning | Obligatorisk |
     | 16–18 °C | Moderat risiko | Sterkt anbefalt |
     | 18–20 °C | Lav risiko | Anbefalt |
@@ -928,7 +928,7 @@ def page_prediksjon():
             **Temperaturgrenser (World Aquatics / FINA):**
             | Temp | Vurdering | Våtdrakt |
             |------|-----------|----------|
-            | < 14 °C | Arrangement bør avlyses | Ikke aktuelt |
+            | < 14 °C | Svømming bør ikke gjennomføres | Ikke aktuelt |
             | 14–16 °C | Høy risiko | Obligatorisk |
             | 16–18 °C | Moderat risiko | Sterkt anbefalt |
             | 18–20 °C | Lav risiko | Anbefalt |
