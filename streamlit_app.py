@@ -44,7 +44,7 @@ STATION_SVANEFOSS        = "2.52.0"    # Vorma – temperatur (upstream referenc
 STATION_FUNNEFOSS_TEMP   = "2.410.0"   # Vorma / Funnefoss – temperatur
 STATION_ERTESEKKEN_Q     = "2.197.0"   # Vorma / Ertesekken – vannføring
 STATION_BLAKER           = "2.17.0"    # Glomma / Blaker – temperatur + vannføring
-STATION_FUNNEFOSS_Q      = "2.279.0"   # Glomma / Funnefoss nedre – vannføring
+STATION_FUNNEFOSS_Q      = "2.412.0"   # Glomma / Funnefoss kraftverk
 STATION_FETSUND          = "2.587.0"   # Fetsund bru – temperatur (målpunkt)
 
 # ── Frost (met.no observations) ──────────────────────────────────────────────
