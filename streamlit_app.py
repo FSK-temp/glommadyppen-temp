@@ -97,7 +97,17 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
     try:
         url = f"{NVE_BASE_URL}/Observations"
         headers = {"X-API-Key": NVE_API_KEY, "accept": "application/json"} if NVE_API_KEY else {"accept": "application/json"}
-        params = {"StationId": station_id, "Parameter": str(parameter), "ResolutionTime": "60"}
+        end_dt   = datetime.utcnow()
+        start_dt = end_dt - timedelta(hours=hours_back)
+        params = {
+            "StationId":      station_id,
+            "Parameter":      str(parameter),
+            "ResolutionTime": "60",
+            "ReferenceTime":  (
+                f"{start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}/"
+                f"{end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            ),
+        }
 
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
