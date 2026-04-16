@@ -771,7 +771,7 @@ def page_informasjon():
 
 def page_prediksjon():
     st.title("Temperaturprediksjon")
-    st.markdown("Predikert vanntemperatur under Glommadyppen basert på observasjoner i Mjøsa, Vorma og Glomma")
+    st.markdown("Predikert vanntemperatur i Glomma basert på observasjoner i Mjøsa, Vorma og Glomma. Prediksjonen er laget for Glommadyppen men kan benyttes for andre aktiviteter i Glomma i sommermånedene")
 
     event_date = calculate_event_date(EVENT_YEAR)
     days_until = (event_date - pd.Timestamp.now(tz='UTC')).days
