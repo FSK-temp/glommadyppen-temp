@@ -1,6 +1,6 @@
 """
-Glommadyppen Vanntemperatur Prediksjon
-Real-time water temperature prediction for Glommadyppen swimming event
+GlommaDyppen Vanntemperatur Prediksjon
+Real-time water temperature prediction for GlommaDyppen swimming event
 
 Author: Anton Vooren
 Date: 2026
@@ -20,7 +20,7 @@ from plotly.subplots import make_subplots
 # ============================================================================
 
 st.set_page_config(
-    page_title="Glommadyppen Temperatur",
+    page_title="GlommaDyppen Temperatur",
     page_icon="🏊‍♂️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -184,7 +184,7 @@ def fetch_weather_forecast(lat, lon, days_ahead=14):
     """Henter varsel fra Met.no Locationforecast."""
     try:
         url     = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
-        headers = {"User-Agent": "GlommadyppenApp/1.0 kontakt@glommadyppen.no"}
+        headers = {"User-Agent": "GlommaDyppenApp/1.0 stevne@fetsk.no"}
         params  = {"lat": lat, "lon": lon}
         response = requests.get(url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
@@ -1103,13 +1103,13 @@ def _wind_energy_chart(energy_df,
 # ============================================================================
 
 def page_informasjon():
-    st.title("Om Glommadyppen Temperaturvarsel")
+    st.title("Om temperaturvarsel for svømming i Glomma og GlommaDyppen")
 
     st.markdown("""
-    Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
-    langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
-    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
+    GlommaDyppen er et Open Water arrangement fra Bingsfossen til Fetsund lenser
+    langs Glomma, arrangert av Fetsund Lenser, Fet Svømmeklubb og Sørumsand IF Svømmegruppe den første lørdagen i august hvert år.
+    Distansen på den lengste øvelsen, Fløter'n, er 11 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år hvilket påvirker sikkerheten.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
     planlegge arrangement og treningsturer.
@@ -1124,7 +1124,7 @@ def page_informasjon():
         st.markdown("""
         Kaldt vann fra Mjøsas dyplag kan nå Glomma ved Fetsund gjennom en kjede av hendelser:
 
-        1. **Sørøst/sør-vind** over Mjøsa skaper Ekman-transport som presser overflatevann
+        1. **Sørøst/sørlig vind** over en viss hastighet og tid ved sørenden av Mjøsa skaper Ekman-transport som presser overflatevann
            mot nordenden av innsjøen og drar kaldt bunnvann (hypolimnion) opp i sør.
         2. Det kalde vannet strømmer ut i **Vorma ved Minnesund** og transporteres
            sørover i elven.
@@ -1133,19 +1133,19 @@ def page_informasjon():
         4. Her blandes det med Glomma-vannet: bare **~14 %** av temperaturavviket
            overlever fortynningen/dispersjon og når Fetsund.
 
-        Effekten kan likevel gi temperaturfall på 3–5 °C ved arrangementet i år med
-        kraftig og vedvarende sørlig vind.
+        Effekten kan gi temperaturfall på 3–5 °C ved arrangementet ved
+        kraftig og vedvarende sørøst/sørlig vind.
         """)
 
     with col2:
         st.subheader("📡 Datakilder")
         st.markdown("""
         **NVE HydAPI** – timesverdier for vanntemperatur og vannføring:
-        - Svanefoss (2.52.0) — Vorma, 22 km fra Mjøsa
-        - Funnefoss (2.410.0) — Vorma, 23,5 km fra Mjøsa
-        - Ertesekken (2.197.0) — Vorma, vannføring (brukes i transporttidsmodellen)
-        - Blaker (2.17.0) — Glomma, nedenfor samløpet
-        - Fetsund (2.587.0) — Målgang / arrangementspunkt
+        - Svanefoss (2.52.0) — Vorma, vanntemperatur, ca. 22 km nedenfor Mjøsa
+        - Ertesekken (2.197.0) — Vorma, vannføring, ca. 21 km nedenfor Mjøsa
+        - Funnefoss (2.410.0) — Glomma, vannføring og vanntemperatur, ca. 7 km ovenfor samløpet med Vorma
+        - Blaker (2.17.0) — Glomma, vanntemperatur og vannføring, ca, 21 km nedenfor samløpet
+        - Fetsund (2.587.0) — Glomma, vanntemperatur, Målgang / arrangementspunkt
 
         **MET Frost API** – historiske vindmålinger fra Kise (SN12680) ved søndre Mjøsa.
 
@@ -1167,7 +1167,7 @@ def page_informasjon():
         **Prediksjonen er pålitelig når:**
         - Det er aktive målinger fra Svanefoss eller Funnefoss (april–september)
         - Du ønsker å vite omtrent hva temperaturen er ved Fetsund **i dag eller i morgen**
-        - Det er innen **1–2 uker** før Glommadyppen
+        - Det er innen **1–2 uker** før GlommaDyppen eller i sommermånedene for treningssvømming
         """)
     with col4:
         st.markdown("""
@@ -1204,7 +1204,7 @@ def page_prediksjon():
     st.title("Temperaturprediksjon")
     st.markdown(
         "Predikert vanntemperatur i Glomma basert på observasjoner i Mjøsa, Vorma og Glomma. "
-        "Prediksjonen er laget for Glommadyppen men kan benyttes for andre aktiviteter "
+        "Prediksjonen er laget for GlommaDyppen, men kan benyttes for andre aktiviteter "
         "i Glomma i sommermånedene."
     )
 
@@ -1299,7 +1299,7 @@ def page_prediksjon():
     if days_until > 14:
         st.info(
             f"ℹ️ Prediksjonen viser nåværende forhold, ikke en prognose for august. "
-            f"Det er {days_until} dager til Glommadyppen "
+            f"Det er {days_until} dager til GlommaDyppen "
             f"({oslo_dt.strftime('%-d. %B %Y')}). "
             f"Prediksjonen er gyldig frem til ca. "
             f"{pred_valid_to.strftime('%-d. %b kl %H:%M')} "
@@ -1522,7 +1522,7 @@ def page_data_varsel():
         Svanefoss (2.52.0) i Vorma 22 km fra Mjøsa ·
         Funnefoss (2.410.0) i Vorma 23,5 km fra Mjøsa ·
         Blaker (2.17.0) i Glomma nedenfor samløp ·
-        Fetsund (2.587.0) målgang Glommadyppen.
+        Fetsund (2.587.0) målgang GlommaDyppen.
         """)
 
     # ── TAB 2: Vannføring ─────────────────────────────────────────────────────
@@ -1681,7 +1681,7 @@ def main():
             st.rerun()
         st.caption(
             f"Oppdatert {pd.Timestamp.now(tz='Europe/Oslo').strftime('%d.%m.%Y %H:%M')} | "
-            "Utviklet av Fet Svømmeklubb for Glommadyppen.no"
+            "Utviklet av Fet Svømmeklubb for GlommaDyppen.no"
         )
 
     if page == "Om siden":
