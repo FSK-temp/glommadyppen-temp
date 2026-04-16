@@ -845,8 +845,8 @@ def page_informasjon():
     st.markdown("""
     Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
     langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
-    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
+    Den lengste distansen, Fløter'n, er 11 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år hvilket påvirker sikkerhet og bruk av våtdrakt.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
     planlegge arrangement og treningsturer.
