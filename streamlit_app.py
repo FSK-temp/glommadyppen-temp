@@ -63,6 +63,9 @@ TEMPERATURE_SURVIVAL = 0.14
 CRITICAL_WIND_SPEED  = 1.9
 WIND_SECTOR_MIN      = 135
 WIND_SECTOR_MAX      = 225
+# Kumulativ vindenergi-terskel (timesdata, dt=1 per obs = 3× CERRA-konvensjon)
+ENERGY_THRESHOLD     = 210.0   # m·h – HØY RISIKO (tilsvarer CERRA-kalibrert 70 m·h)
+ENERGY_WARN          = 140.0   # m·h – MODERAT RISIKO (~67 % av terskel)
 
 # ── Open Water temperaturgrenser ─────────────────────────────────────────────
 OW_ABORT            = 14.0
@@ -836,6 +839,266 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
 
 
 # ============================================================================
+# WIND ENERGY FUNCTIONS
+# ============================================================================
+
+def build_wind_energy_series(frost_df, forecast_df, window_hours=168):
+    """
+    Beregner rullende 7-dagers kumulativ SE/S-vindenergi E(t).
+
+    Formel:  E(t) = Σ  v_i × Δtᵢ   for alle obs i [t − window_hours, t]
+                        der vindretning ∈ [WIND_SECTOR_MIN, WIND_SECTOR_MAX]
+
+    Δtᵢ (timer mellom observasjoner) håndterer automatisk at Frost API er
+    timesbasert (Δt≈1) mens Met.no-varselet er 6-timers etter dag 3 (Δt≈6).
+    Terskel er 210 m·h uavhengig av dataoppløsning (= CERRA 70 m·h med dt=3).
+
+    Broen mellom historikk og prognose er sømløs: begge kildene leverer
+    wind_speed og wind_direction, og formelen brukes identisk.
+
+    Returnerer DataFrame:
+        time, wind_speed, wind_direction, v_ses, dt,
+        E, E_upper, E_lower, is_forecast
+    """
+    rows = []
+
+    if frost_df is not None and not frost_df.empty:
+        df_f = frost_df.copy()
+        df_f['time'] = pd.to_datetime(df_f['time'])
+        if df_f['time'].dt.tz is None:
+            df_f['time'] = df_f['time'].dt.tz_localize('UTC')
+        for _, r in df_f.sort_values('time').iterrows():
+            rows.append({
+                'time':           r['time'],
+                'wind_speed':     float(r.get('wind_speed', 0) or 0),
+                'wind_direction': float(r.get('wind_direction', 0) or 0),
+                'is_forecast':    False,
+            })
+
+    last_obs_time = (rows[-1]['time'] if rows
+                     else pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=1))
+
+    if forecast_df is not None and not forecast_df.empty:
+        df_fc = forecast_df.copy()
+        df_fc['time'] = pd.to_datetime(df_fc['time'])
+        if df_fc['time'].dt.tz is None:
+            df_fc['time'] = df_fc['time'].dt.tz_localize('UTC')
+        for _, r in df_fc[df_fc['time'] > last_obs_time].sort_values('time').iterrows():
+            rows.append({
+                'time':           r['time'],
+                'wind_speed':     float(r.get('wind_speed', 0) or 0),
+                'wind_direction': float(r.get('wind_direction', 0) or 0),
+                'is_forecast':    True,
+            })
+
+    if len(rows) < 2:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).sort_values('time').reset_index(drop=True)
+
+    # Δt per observasjon (timer) – håndterer variabel oppløsning
+    df['dt'] = (df['time'].diff().dt.total_seconds().fillna(3600) / 3600).clip(0.5, 12)
+
+    # SE/S-komponent og energibidrag
+    in_sector   = ((df['wind_direction'] >= WIND_SECTOR_MIN) &
+                   (df['wind_direction'] <= WIND_SECTOR_MAX))
+    df['v_ses']     = np.where(in_sector, df['wind_speed'], 0.0)
+    df['e_contrib'] = df['v_ses'] * df['dt']
+
+    # Rullende sum over tidsvindusperioden
+    df_idx     = df.set_index('time')
+    df_idx['E'] = (df_idx['e_contrib']
+                   .rolling(f'{window_hours}h', min_periods=1)
+                   .sum()
+                   .round(2))
+    df = df_idx.reset_index()
+
+    # Usikkerhetsbånd på prognosen – vokser som √(tid fremover)
+    now_utc  = pd.Timestamp.now(tz='UTC')
+    max_fc_h = 120.0
+    df['E_upper'] = df['E']
+    df['E_lower'] = df['E']
+
+    fc_mask = df['is_forecast'].values
+    if fc_mask.any():
+        h_ahead = ((df.loc[fc_mask, 'time'] - now_utc)
+                   .dt.total_seconds().div(3600).clip(lower=0).values)
+        unc = 25.0 * np.sqrt(h_ahead / max_fc_h)
+        df.loc[fc_mask, 'E_upper'] = np.round(df.loc[fc_mask, 'E'].values + unc, 2)
+        df.loc[fc_mask, 'E_lower'] = np.round(
+            np.maximum(0, df.loc[fc_mask, 'E'].values - unc), 2)
+
+    return df
+
+
+def _wind_energy_chart(energy_df,
+                       title="Kumulativ SE/S-vindenergi – oppvellingsrisiko"):
+    """
+    To-panel Plotly-graf:
+      Panel 1 – Rullende 7-dagers E (observert + prognose + usikkerhetsbånd)
+                med risikosoner, terskel (210 m·h) og advarselsnivå (140 m·h).
+      Panel 2 – SE/S vindhastighetsstolper per tidssteg (obs + prognose).
+
+    Spesielle markører:
+      • «Nå»-linje der historikk slutter og prognose begynner.
+      • «Gammel hendelse faller ut»-linje: tidspunktet der den eldste store
+        SE/S-hendelsen forlater det 7-dagers rullende vinduet.
+    """
+    if energy_df is None or energy_df.empty:
+        return None
+
+    obs = energy_df[~energy_df['is_forecast']].copy()
+    fc  = energy_df[ energy_df['is_forecast']].copy()
+    now_utc = pd.Timestamp.now(tz='UTC')
+
+    # Koble observert og prognose slik at linjen er kontinuerlig
+    if not obs.empty and not fc.empty:
+        bridge = obs.iloc[-1:].copy()
+        bridge['is_forecast'] = True
+        fc = pd.concat([bridge, fc]).reset_index(drop=True)
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.65, 0.35],
+        vertical_spacing=0.08,
+        shared_xaxes=True,
+        subplot_titles=(
+            'Akkumulert SE/S-vindenergi – rullende 7-dagers vindu',
+            'SE/S vindstyrke per tidssteg',
+        ),
+    )
+
+    # ── Risikosoner (panel 1) ─────────────────────────────────────────────────
+    fig.add_hrect(y0=ENERGY_THRESHOLD, y1=310,
+                  fillcolor='rgba(220,53,69,0.09)',  line_width=0, row=1, col=1)
+    fig.add_hrect(y0=ENERGY_WARN, y1=ENERGY_THRESHOLD,
+                  fillcolor='rgba(239,159,39,0.09)', line_width=0, row=1, col=1)
+    fig.add_hrect(y0=0, y1=ENERGY_WARN,
+                  fillcolor='rgba(40,167,69,0.07)',  line_width=0, row=1, col=1)
+
+    fig.add_hline(y=ENERGY_THRESHOLD,
+                  line_dash='dot', line_color='rgba(163,45,45,0.55)', line_width=1.2,
+                  annotation_text='210 m·h – terskel',
+                  annotation_position='right',
+                  annotation_font_size=10,
+                  annotation_font_color='rgba(163,45,45,0.75)',
+                  row=1, col=1)
+    fig.add_hline(y=ENERGY_WARN,
+                  line_dash='dot', line_color='rgba(186,117,23,0.45)', line_width=1.0,
+                  annotation_text='140 m·h – advarsel',
+                  annotation_position='right',
+                  annotation_font_size=10,
+                  annotation_font_color='rgba(186,117,23,0.70)',
+                  row=1, col=1)
+
+    # ── Usikkerhetsbånd (polygon-fill, panel 1) ───────────────────────────────
+    if not fc.empty:
+        t_fwd = list(fc['time'])
+        t_rev = list(fc['time'])[::-1]
+        fig.add_trace(go.Scatter(
+            x=t_fwd + t_rev,
+            y=list(fc['E_upper']) + list(fc['E_lower'])[::-1],
+            fill='toself',
+            fillcolor='rgba(56,141,228,0.13)',
+            line=dict(color='rgba(0,0,0,0)', width=0),
+            name='Usikkerhet (±1σ)',
+            hoverinfo='skip',
+        ), row=1, col=1)
+
+    # ── E-kurve: observert (panel 1) ──────────────────────────────────────────
+    if not obs.empty:
+        fig.add_trace(go.Scatter(
+            x=obs['time'], y=obs['E'],
+            mode='lines', name='Observert E (Frost)',
+            line=dict(color='#185FA5', width=2),
+            hovertemplate='<b>E (obs)</b>: %{y:.1f} m·h<extra></extra>',
+        ), row=1, col=1)
+
+    # ── E-kurve: prognose (panel 1) ───────────────────────────────────────────
+    if not fc.empty:
+        fig.add_trace(go.Scatter(
+            x=fc['time'], y=fc['E'],
+            mode='lines', name='Prognosert E (Met.no)',
+            line=dict(color='#185FA5', width=2, dash='dash'),
+            hovertemplate='<b>E (varsel)</b>: %{y:.1f} m·h<extra></extra>',
+        ), row=1, col=1)
+
+    # ── «Nå»-markør ───────────────────────────────────────────────────────────
+    now_ms = now_utc.timestamp() * 1000
+    for row in [1, 2]:
+        fig.add_vline(x=now_ms,
+                      line_dash='dot',
+                      line_color='rgba(100,100,100,0.45)',
+                      line_width=1,
+                      annotation_text='Nå' if row == 1 else '',
+                      annotation_position='top left',
+                      annotation_font_size=11,
+                      annotation_font_color='rgba(100,100,100,0.75)',
+                      row=row, col=1)
+
+    # ── «Gammel hendelse faller ut»-markør ────────────────────────────────────
+    # Finn eldste tidspunkt med signifikant SE/S-bidrag og legg til 7 dager
+    if not obs.empty:
+        big_ses = obs[obs['e_contrib'] > 1.5]
+        if not big_ses.empty:
+            rolloff_time = big_ses.iloc[0]['time'] + pd.Timedelta(hours=168)
+            if rolloff_time > now_utc:
+                ro_ms = rolloff_time.timestamp() * 1000
+                fig.add_vline(x=ro_ms,
+                              line_dash='dot',
+                              line_color='rgba(186,117,23,0.40)',
+                              line_width=1,
+                              annotation_text='gammel hendelse faller ut',
+                              annotation_position='top right',
+                              annotation_font_size=10,
+                              annotation_font_color='rgba(186,117,23,0.70)',
+                              row=1, col=1)
+
+    # ── SE/S-vindstolper (panel 2) ────────────────────────────────────────────
+    if not obs.empty:
+        fig.add_trace(go.Bar(
+            x=obs['time'], y=obs['v_ses'],
+            name='SE/S vind (obs)',
+            marker_color='rgba(239,159,39,0.55)',
+            hovertemplate='%{y:.1f} m/s<extra></extra>',
+        ), row=2, col=1)
+
+    if not fc.empty:
+        fig.add_trace(go.Bar(
+            x=fc['time'], y=fc['v_ses'],
+            name='SE/S vind (varsel)',
+            marker_color='rgba(239,159,39,0.25)',
+            hovertemplate='%{y:.1f} m/s<extra></extra>',
+        ), row=2, col=1)
+
+    fig.add_hline(y=CRITICAL_WIND_SPEED,
+                  line_dash='dot',
+                  line_color='rgba(163,45,45,0.40)',
+                  line_width=1,
+                  annotation_text=f'{CRITICAL_WIND_SPEED} m/s',
+                  annotation_position='right',
+                  annotation_font_size=10,
+                  annotation_font_color='rgba(163,45,45,0.65)',
+                  row=2, col=1)
+
+    fig.update_layout(
+        title     = title,
+        hovermode = 'x unified',
+        template  = 'plotly_white',
+        height    = 540,
+        margin    = dict(l=50, r=120, t=50, b=40),
+        barmode   = 'overlay',
+        legend    = dict(orientation='h', yanchor='bottom', y=1.02,
+                         xanchor='center', x=0.5, font=dict(size=10)),
+    )
+    fig.update_yaxes(title_text='E (m·h)', range=[0, 290], row=1, col=1)
+    fig.update_yaxes(title_text='m/s',                     row=2, col=1)
+    fig.update_xaxes(showticklabels=True,                  row=2, col=1)
+
+    return fig
+
+
+# ============================================================================
 # PAGE: INFORMASJON
 # ============================================================================
 
@@ -845,8 +1108,8 @@ def page_informasjon():
     st.markdown("""
     Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
     langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
-    Den lengste distansen, Fløter'n, er 11 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år hvilket påvirker sikkerhet og bruk av våtdrakt.
+    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
     planlegge arrangement og treningsturer.
@@ -964,6 +1227,7 @@ def page_prediksjon():
         blaker_temp    = fetch_nve_data(STATION_BLAKER,         1003, hours_back=168)
         fetsund_temp   = fetch_nve_data(STATION_FETSUND,        1003, hours_back=168)
         ertesekken_q   = fetch_nve_data(STATION_ERTESEKKEN_Q,   1001, hours_back=168)
+        frost_vind     = fetch_frost_wind(hours_back=168)
         weather_mjosa  = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON)
         if not weather_mjosa.empty:
             weather_mjosa = add_southerly_component(weather_mjosa)
@@ -1140,27 +1404,67 @@ def page_prediksjon():
     else:
         st.warning("Ikke nok data for prognosevisning.")
 
-    # ── Vindvarsel Mjøsa ──────────────────────────────────────────────────────
-    if not weather_mjosa.empty:
+    # ── Vind og oppvellingsrisiko ─────────────────────────────────────────────
+    if not weather_mjosa.empty or not frost_vind.empty:
         st.divider()
-        st.subheader("Vindvarsel – Mjøsa (5 dager)")
-        next_48h = weather_mjosa.head(48)
-        avg_wind = next_48h['wind_speed'].mean()
-        max_wind = next_48h['wind_speed'].max()
-        avg_ses  = next_48h['southerly_wind'].mean()
+        st.subheader("Vind og oppvellingsrisiko – Mjøsa")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Gj.snitt vind (48t)", f"{avg_wind:.1f} m/s")
-        c2.metric("Maks vind (48t)",     f"{max_wind:.1f} m/s")
-        if avg_ses >= CRITICAL_WIND_SPEED:
-            c3.metric("SE/S-vind (48t)", f"{avg_ses:.1f} m/s",
-                      delta="⚠️ Oppvellings-risiko!", delta_color="inverse")
+        energy_df = build_wind_energy_series(frost_vind, weather_mjosa)
+
+        # ── Metrics ──────────────────────────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+
+        if not energy_df.empty:
+            obs_e  = energy_df[~energy_df['is_forecast']]
+            fc_e   = energy_df[ energy_df['is_forecast']]
+            cur_E  = float(obs_e['E'].iloc[-1]) if not obs_e.empty else 0.0
+            pct    = round(cur_E / ENERGY_THRESHOLD * 100)
+            fc_E   = float(fc_e['E'].iloc[-1])       if not fc_e.empty else cur_E
+            fc_Ehi = float(fc_e['E_upper'].max())    if not fc_e.empty else cur_E
+
+            c1.metric("Kumulativ E nå",   f"{cur_E:.1f} m·h",
+                      help="Rullende 7-dagers sum av SE/S-vindenergi (Frost API)")
+            c2.metric("Andel av terskel", f"{pct} %",
+                      help="210 m·h = 100 % (timesdata-konvensjon = CERRA 70 m·h × 3)")
+            c3.metric("Prognosert E (dag +5)", f"{fc_E:.1f} m·h",
+                      delta="⚠️ Kan overskride terskel!" if fc_Ehi >= ENERGY_THRESHOLD else None,
+                      delta_color="inverse" if fc_Ehi >= ENERGY_THRESHOLD else "normal")
         else:
-            c3.metric("SE/S-vind (48t)", f"{avg_ses:.1f} m/s")
+            c1.metric("Kumulativ E nå", "N/A")
+            c2.metric("Andel av terskel", "N/A")
+            c3.metric("Prognosert E (dag +5)", "N/A")
 
-        chart = _wind_forecast_chart(weather_mjosa.head(120), "Vindvarsel Mjøsa")
-        if chart:
-            st.plotly_chart(chart, use_container_width=True)
+        if not weather_mjosa.empty:
+            avg_ses = weather_mjosa.head(48)['southerly_wind'].mean()
+            if avg_ses >= CRITICAL_WIND_SPEED:
+                c4.metric("SE/S-vind (48t)", f"{avg_ses:.1f} m/s",
+                          delta="⚠️ Oppvellings-risiko!", delta_color="inverse")
+            else:
+                c4.metric("SE/S-vind (48t)", f"{avg_ses:.1f} m/s")
+
+        # ── Faner: energikurve | vindretning ─────────────────────────────────
+        wind_tabs = st.tabs(["Kumulativ oppvellingsrisiko", "Vindretning og -hastighet"])
+
+        with wind_tabs[0]:
+            if not energy_df.empty:
+                fig_e = _wind_energy_chart(energy_df)
+                if fig_e:
+                    st.plotly_chart(fig_e, use_container_width=True)
+                st.caption(
+                    "E = Σ v_i × Δtᵢ for alle obs der vindretning ∈ 135–225° (SE/S), "
+                    "rullende 7-dagers vindu · "
+                    "Terskel 210 m·h (timesdata) = CERRA-kalibrert 70 m·h · "
+                    "Usikkerheten vokser som √(tid fremover). "
+                    "Markøren «gammel hendelse faller ut» viser når siste store "
+                    "SE/S-episode forlater vinduet og E synker naturlig."
+                )
+            else:
+                st.warning("Vindenergi-beregning krever Frost API-data.")
+
+        with wind_tabs[1]:
+            chart = _wind_forecast_chart(weather_mjosa.head(120), "Vindvarsel – Mjøsa")
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
 
 
 # ============================================================================
