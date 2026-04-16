@@ -51,35 +51,31 @@ STATION_FETSUND          = "2.587.0"   # Fetsund bru – temperatur (målpunkt)
 FROST_STATION_KISE = "SN12680"   # Kise, søndre Mjøsa
 
 # ── Met.no koordinater ───────────────────────────────────────────────────────
-MJOSA_LAT,       MJOSA_LON       = 60.78,   10.72    # Kise, søndre Mjøsa
-BINGSFOSSEN_LAT, BINGSFOSSEN_LON = 60.2172, 11.5528  # Start
-FETSUND_LAT,     FETSUND_LON     = 59.9297, 11.5833  # Mål / Fetsund lenser
+MJOSA_LAT,       MJOSA_LON       = 60.78,   10.72
+BINGSFOSSEN_LAT, BINGSFOSSEN_LON = 60.2172, 11.5528
+FETSUND_LAT,     FETSUND_LON     = 59.9297, 11.5833
 
 # ── Modellparametere ─────────────────────────────────────────────────────────
-# Transporttid beregnes dynamisk som t = TRANSPORT_COEFF / Q  (timer)
-# 9700 er empirisk bestemt som Svanefoss → Fetsund (45 km), R²=0.73, n=19
-TRANSPORT_COEFF      = 9700     # m / (m³/s) → timer; Svanefoss→Fetsund
-TRANSPORT_COEFF_BLA  = 6871     # m / (m³/s) → timer; Svanefoss→Blaker
-FALLBACK_DISCHARGE   = 437.0    # m³/s – median august; brukes kun hvis Q-data mangler
-TEMPERATURE_SURVIVAL = 0.14     # 14 % av temperaturfall overlever fortynning og dispersjon
-CRITICAL_WIND_SPEED  = 1.9      # m/s vedvarende sørlig vind for å utløse oppvelling
-WIND_SECTOR_MIN      = 135      # Kritisk vindretning fra (°)
-WIND_SECTOR_MAX      = 225      # Kritisk vindretning til (°)
+TRANSPORT_COEFF      = 9700
+TRANSPORT_COEFF_BLA  = 6871
+FALLBACK_DISCHARGE   = 437.0
+TEMPERATURE_SURVIVAL = 0.14
+CRITICAL_WIND_SPEED  = 1.9
+WIND_SECTOR_MIN      = 135
+WIND_SECTOR_MAX      = 225
 
 # ── Open Water temperaturgrenser ─────────────────────────────────────────────
-# Basert på World Aquatics (FINA) OW-regler og norske sikkerhetsterskler
-OW_ABORT            = 14.0   # Under: svømming i Glomma bør ikke gjennomføres
-OW_WETSUIT_REQUIRED = 16.0   # Under: våtdrakt obligatorisk (FINA-minimum)
-OW_WETSUIT_STRONG   = 18.0   # Under: våtdrakt sterkt anbefalt
-OW_WETSUIT_OPTIONAL = 20.0   # Under: våtdrakt anbefalt / valgfritt
-OW_TOO_WARM         = 24.0   # Over:  våtdrakt frarådes (overopphetingsrisiko)
+OW_ABORT            = 14.0
+OW_WETSUIT_REQUIRED = 16.0
+OW_WETSUIT_STRONG   = 18.0
+OW_WETSUIT_OPTIONAL = 20.0
+OW_TOO_WARM         = 24.0
 
 # ── Arrangement ──────────────────────────────────────────────────────────────
 EVENT_YEAR        = 2026
 EVENT_MONTH       = 8
-EVENT_DAY_OF_WEEK = 5   # Lørdag (0=mandag)
+EVENT_DAY_OF_WEEK = 5
 
-#-- Bilde ---
 GD_header = Image.open("Samensatt_logo_GlommDyppen.jpg")
 
 # ============================================================================
@@ -96,7 +92,8 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
     """
     try:
         url = f"{NVE_BASE_URL}/Observations"
-        headers = {"X-API-Key": NVE_API_KEY, "accept": "application/json"} if NVE_API_KEY else {"accept": "application/json"}
+        headers = ({"X-API-Key": NVE_API_KEY, "accept": "application/json"}
+                   if NVE_API_KEY else {"accept": "application/json"})
         end_dt   = datetime.utcnow()
         start_dt = end_dt - timedelta(hours=hours_back)
         params = {
@@ -108,7 +105,6 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
                 f"{end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
             ),
         }
-
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
@@ -128,14 +124,10 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
         end_time   = pd.Timestamp.now(tz='UTC')
         df = df[df['time'] >= end_time - pd.Timedelta(hours=hours_back)]
 
-        # Inkluder ukontrollerte data (quality=0) i tillegg til godkjente (1) og korrigerte (2).
-        # NVE-data blir sjelden etterkontrollert i sanntid, så quality=0 er normalt
-        # for ferske målinger. Fysisk sanity-sjekk nedenfor er tilstrekkelig filter.
         if 'quality' in df.columns:
             df = df[df['quality'].isin([0, 1, 2])]
 
-        # Fysisk sanity-sjekk: forkast umulige verdier
-        # (Svanefoss har kjente sensorfeil med verdier rundt -20 °C med quality=1)
+        # Fysisk sanity-sjekk (Svanefoss har kjente sensorfeil ~−20 °C)
         if parameter == 1003:
             df = df[(df['value'] > 0.0) & (df['value'] < 35.0)]
 
@@ -143,7 +135,6 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
         for col in ['time', 'value', 'quality']:
             if col not in df.columns:
                 df[col] = None
-
         return df[['time', 'value', 'quality']]
 
     except requests.exceptions.HTTPError:
@@ -156,15 +147,10 @@ def fetch_nve_data(station_id, parameter, hours_back=168):
 
 @st.cache_data(ttl=3600)
 def fetch_frost_wind(hours_back=168):
-    """
-    Henter historiske vindmålinger fra Frost API (Kise, SN12680).
-    Brukes som observasjonskilde for siste uke – CERRA-reanalyse har for lang
-    forsinkelse til sanntidsbruk.
-    """
+    """Henter historiske vindmålinger fra Frost API (Kise, SN12680)."""
     try:
         end_time   = datetime.utcnow()
         start_time = end_time - timedelta(hours=hours_back)
-
         url    = f"{FROST_BASE_URL}/observations/v0.jsonld"
         params = {
             "sources":         FROST_STATION_KISE,
@@ -173,49 +159,41 @@ def fetch_frost_wind(hours_back=168):
             "timeresolutions": "PT1H",
         }
         r = requests.get(url, params=params, auth=(FROST_CLIENT_ID, ""), timeout=30)
-
         if r.status_code != 200:
             return pd.DataFrame()
-
         records = []
         for item in r.json().get('data', []):
             obs_dict = {'time': pd.to_datetime(item['referenceTime'])}
             for obs in item.get('observations', []):
                 obs_dict[obs['elementId']] = obs['value']
             records.append(obs_dict)
-
         if not records:
             return pd.DataFrame()
-
         df = pd.DataFrame(records).sort_values('time').reset_index(drop=True)
         df = df.rename(columns={'wind_from_direction': 'wind_direction'})
         return df
-
     except Exception:
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=21600)
 def fetch_weather_forecast(lat, lon, days_ahead=14):
-    """Henter varsel fra Met.no Locationforecast (opp til ~10 dager med timesoppløsning)."""
+    """Henter varsel fra Met.no Locationforecast."""
     try:
         url     = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
         headers = {"User-Agent": "GlommadyppenApp/1.0 kontakt@glommadyppen.no"}
         params  = {"lat": lat, "lon": lon}
-
         response = requests.get(url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
 
         forecast_list = []
         max_time = pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=days_ahead)
-
         for ts in data['properties']['timeseries']:
             t = pd.to_datetime(ts['time'])
             if t > max_time:
                 break
             details = ts['data']['instant']['details']
-            # Nedbør hentes fra next_1_hours eller next_6_hours
             precip = None
             for window in ('next_1_hours', 'next_6_hours'):
                 if window in ts['data']:
@@ -229,9 +207,7 @@ def fetch_weather_forecast(lat, lon, days_ahead=14):
                 'wind_gust':       details.get('wind_speed_of_gust'),
                 'precipitation':   precip,
             })
-
         return pd.DataFrame(forecast_list)
-
     except Exception as e:
         st.error(f"Feil ved henting av varsel: {e}")
         return pd.DataFrame()
@@ -245,7 +221,8 @@ def add_southerly_component(df):
     """Legger til southerly_wind-kolonne (vind fra SE/S sektor, 135–225°)."""
     if df.empty or 'wind_direction' not in df.columns:
         return df
-    is_ses = (df['wind_direction'] >= WIND_SECTOR_MIN) & (df['wind_direction'] <= WIND_SECTOR_MAX)
+    is_ses = ((df['wind_direction'] >= WIND_SECTOR_MIN) &
+              (df['wind_direction'] <= WIND_SECTOR_MAX))
     df['southerly_wind'] = np.where(is_ses, df['wind_speed'], 0.0)
     return df
 
@@ -275,10 +252,6 @@ def detect_temperature_drop(df, threshold_C=2.0, window_hours=6):
 def calculate_travel_time(discharge_df):
     """
     Beregner transporttid Svanefoss → Fetsund som t = 9700 / Q (timer).
-
-    Bruker medianen av siste 24 timers observasjoner for å dempe korttidssvingninger.
-    Faller tilbake til august-medianen (437 m³/s → 22 t) hvis data mangler.
-
     Returnerer (travel_time_hours, q_used, source_label).
     """
     if discharge_df is not None and not discharge_df.empty:
@@ -289,8 +262,6 @@ def calculate_travel_time(discharge_df):
         if len(last24) > 0:
             q = last24.median()
             return round(TRANSPORT_COEFF / q, 1), round(q, 0), "siste 24t (Ertesekken)"
-
-    # Fallback
     q = FALLBACK_DISCHARGE
     return round(TRANSPORT_COEFF / q, 1), q, f"august-median ({FALLBACK_DISCHARGE:.0f} m³/s)"
 
@@ -298,14 +269,10 @@ def calculate_travel_time(discharge_df):
 def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime):
     """
     Predikerer Fetsund-temperatur for arrangementet.
-
-    Transporttid beregnes dynamisk som t = 9700 / Q (Svanefoss → Fetsund),
-    der Q er medianen av siste 24 timers målinger ved Ertesekken.
-    14 % av temperaturavviket i Vorma overlever transport og dispersjon frem til Fetsund.
+    Transporttid = 9700 / Q. 14 % av avviket overlever til Fetsund.
     """
     if vorma_temp_df.empty:
         return None
-
     if event_datetime.tzinfo is None:
         event_datetime = event_datetime.replace(tzinfo=pd.Timestamp.now(tz='UTC').tzinfo)
 
@@ -330,15 +297,15 @@ def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime):
     fetsund_temp  = baseline_temp + anomaly * TEMPERATURE_SURVIVAL
 
     return {
-        'predicted_temp':  fetsund_temp,
-        'vorma_temp':      vorma_temp,
-        'baseline_temp':   baseline_temp,
-        'anomaly':         anomaly,
-        'vorma_time':      vorma_time,
-        'travel_hours':    travel_hours,
-        'q_used':          q_used,
-        'q_source':        q_source,
-        'confidence':      _calculate_confidence(df, prediction_time),
+        'predicted_temp': fetsund_temp,
+        'vorma_temp':     vorma_temp,
+        'baseline_temp':  baseline_temp,
+        'anomaly':        anomaly,
+        'vorma_time':     vorma_time,
+        'travel_hours':   travel_hours,
+        'q_used':         q_used,
+        'q_source':       q_source,
+        'confidence':     _calculate_confidence(df, prediction_time),
     }
 
 
@@ -358,14 +325,12 @@ def _calculate_confidence(df, target_time):
 
 def assess_risk_open_water(predicted_temp, weather_forecast=None):
     """
-    Risikovurdering basert på Open Water-regler (World Aquatics / FINA) og
-    norske sikkerhetsterskler. Returnerer:
-        risk_label, color, wetsuit_status, wetsuit_color, details_list
+    Risikovurdering basert på World Aquatics / FINA OW-regler.
+    Returnerer: risk_label, color, wetsuit_status, wetsuit_color, details_list
     """
     if predicted_temp is None:
         return "UKJENT", "#6c757d", "Ukjent", "#6c757d", []
 
-    # Oppvellings-risiko fra vindvarsel
     southerly_risk = False
     if weather_forecast is not None and not weather_forecast.empty:
         df_wf = weather_forecast.copy()
@@ -374,87 +339,62 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
         avg_s = df_wf.head(48)['southerly_wind'].mean()
         southerly_risk = avg_s >= CRITICAL_WIND_SPEED
 
-    details = []
-
     if predicted_temp < OW_ABORT:
-        label  = "Svømming i Glomma bør ikke gjennomføres"
-        color  = "#6B0000"
-        ws     = "Ikke aktuelt — for kaldt"
-        ws_col = "#6B0000"
+        label, color = "Svømming bør ikke gjennomføres", "#6B0000"
+        ws,  ws_col  = "Ikke aktuelt — for kaldt",       "#6B0000"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C er under absolutt minimumsgrense (14 °C).",
             "World Aquatics (FINA) forbyr konkurranser under 16 °C.",
             "Hypotermirisiko er ekstremt høy — svømming bør ikke gjennomføres.",
         ]
-
     elif predicted_temp < OW_WETSUIT_REQUIRED:
-        label  = "Høy risiko – vurder svømming nøye"
-        color  = "#dc3545"
-        ws     = "Våtdrakt obligatorisk"
-        ws_col = "#dc3545"
+        label, color = "Høy risiko – vurder svømming nøye", "#dc3545"
+        ws,  ws_col  = "Våtdrakt obligatorisk",             "#dc3545"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C er under FINA-minimumsgrensen på 16 °C.",
             "Våtdrakt er obligatorisk i henhold til internasjonale Open Water-regler.",
             "Arrangør bør vurdere om arrangementet er forsvarlig å gjennomføre.",
-            "Deltakere uten våtdrakt bør ikke starte.",
         ]
-
     elif predicted_temp < OW_WETSUIT_STRONG:
-        label  = "MODERAT RISIKO"
-        color  = "#e07b00"
-        ws     = "Våtdrakt sterkt anbefalt"
-        ws_col = "#e07b00"
+        label, color = "Moderat risiko", "#e07b00"
+        ws,  ws_col  = "Våtdrakt sterkt anbefalt", "#e07b00"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C er kaldt for langdistansesvømming.",
-            "FINA tillater arrangement, men anbefaler våtdrakt i dette temperaturintervallet.",
+            "FINA tillater arrangement, men anbefaler våtdrakt i dette intervallet.",
             "Alle deltakere bør bruke våtdrakt — spesielt for distanser over 5 km.",
-            "Utrente og uerfarne bør ikke starte uten våtdrakt.",
         ]
-
     elif predicted_temp < OW_WETSUIT_OPTIONAL:
-        label  = "LAV RISIKO"
-        color  = "#f0a500"
-        ws     = "Våtdrakt anbefalt"
-        ws_col = "#f0a500"
+        label, color = "Lav risiko", "#f0a500"
+        ws,  ws_col  = "Våtdrakt anbefalt", "#f0a500"
         details = [
-            f"Predikert temperatur {predicted_temp:.1f} °C er kjølig — våtdrakt gir komfort og sikkerhet.",
+            f"Predikert temperatur {predicted_temp:.1f} °C — kjølig, våtdrakt gir komfort og sikkerhet.",
             "Erfarne langdistansesvømmere kan vurdere uten våtdrakt.",
-            "Nybegynnere og utrente anbefales sterkt å bruke våtdrakt.",
         ]
-
     elif predicted_temp < OW_TOO_WARM:
-        label  = "GODE FORHOLD"
-        color  = "#28a745"
-        ws     = "Våtdrakt valgfritt"
-        ws_col = "#28a745"
+        label, color = "Gode forhold", "#28a745"
+        ws,  ws_col  = "Våtdrakt valgfritt", "#28a745"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C er ideell for Open Water-svømming.",
             "Våtdrakt er tillatt men ikke nødvendig for de fleste deltakere.",
-            "Utmerkede konkurranseforhold.",
         ]
-
     else:
-        label  = "VARMT VANN"
-        color  = "#17a2b8"
-        ws     = "Våtdrakt frarådes"
-        ws_col = "#c0392b"
+        label, color = "Varmt vann", "#17a2b8"
+        ws,  ws_col  = "Våtdrakt frarådes", "#c0392b"
         details = [
             f"Predikert temperatur {predicted_temp:.1f} °C — varmt vann.",
             "Våtdrakt kan gi overopphetingsrisiko og frarådes.",
-            "Gode svømmeforhold — vær oppmerksom på hydrering.",
         ]
 
     if southerly_risk:
         details.append(
             "⚠️ Vedvarende sørlig vind er varslet — temperaturfall fra Mjøsa-oppvelling er mulig."
         )
-
     return label, color, ws, ws_col, details
 
 
 def calculate_event_date(year):
     """Beregner dato for første lørdag i august."""
-    first_day = datetime(year, EVENT_MONTH, 1)
+    first_day   = datetime(year, EVENT_MONTH, 1)
     days_to_sat = (EVENT_DAY_OF_WEEK - first_day.weekday()) % 7
     if days_to_sat == 0 and first_day.weekday() != EVENT_DAY_OF_WEEK:
         days_to_sat = 7
@@ -464,7 +404,6 @@ def calculate_event_date(year):
 
 
 def wind_rose_label(degrees):
-    """Konverterer vindretning i grader til kompassretning."""
     dirs = ['N', 'NØ', 'Ø', 'SØ', 'S', 'SV', 'V', 'NV']
     return dirs[round(degrees / 45) % 8]
 
@@ -530,8 +469,8 @@ def _wind_obs_chart(df, title="Vindmålinger"):
         return None
     fig = make_subplots(rows=2, cols=1, vertical_spacing=0.12,
                         subplot_titles=('Vindhastighet (m/s)', 'Vindretning (°)'))
-    is_ses = (df.get('wind_direction', pd.Series(dtype=float)) >= WIND_SECTOR_MIN) & \
-             (df.get('wind_direction', pd.Series(dtype=float)) <= WIND_SECTOR_MAX)
+    is_ses = ((df.get('wind_direction', pd.Series(dtype=float)) >= WIND_SECTOR_MIN) &
+              (df.get('wind_direction', pd.Series(dtype=float)) <= WIND_SECTOR_MAX))
     ses_speed = np.where(is_ses, df['wind_speed'], np.nan)
     fig.add_trace(go.Scatter(
         x=df['time'], y=df['wind_speed'], mode='lines', name='Total vind',
@@ -576,7 +515,8 @@ def _wind_forecast_chart(df, title="Vindvarsel"):
     fig.add_hline(y=CRITICAL_WIND_SPEED, line_dash="dot", line_color="red",
                   annotation_text=f"{CRITICAL_WIND_SPEED} m/s terskel", row=1, col=1)
     if 'wind_direction' in df.columns:
-        is_ses = (df['wind_direction'] >= WIND_SECTOR_MIN) & (df['wind_direction'] <= WIND_SECTOR_MAX)
+        is_ses = ((df['wind_direction'] >= WIND_SECTOR_MIN) &
+                  (df['wind_direction'] <= WIND_SECTOR_MAX))
         marker_colors = ['#D62828' if s else '#AAAAAA' for s in is_ses]
         fig.add_trace(go.Scatter(
             x=df['time'], y=df['wind_direction'], mode='markers', name='Retning',
@@ -600,10 +540,10 @@ def _daily_forecast_table(df, days=10):
     df['date'] = pd.to_datetime(df['time']).dt.tz_convert('Europe/Oslo').dt.date
     rows = []
     for date in sorted(df['date'].unique())[:days]:
-        d = df[df['date'] == date]
+        d    = df[df['date'] == date]
         avg_s = d['southerly_wind'].mean()
-        risiko_ikon = "🔴" if avg_s >= CRITICAL_WIND_SPEED else \
-                      "🟡" if avg_s >= 1.2 else "🟢"
+        risiko_ikon = ("🔴" if avg_s >= CRITICAL_WIND_SPEED else
+                       "🟡" if avg_s >= 1.2 else "🟢")
         rows.append({
             'Dato':          pd.to_datetime(date).strftime('%a %d.%m'),
             'Lufttemp':      f"{d['air_temperature'].min():.0f}–{d['air_temperature'].max():.0f} °C",
@@ -617,11 +557,6 @@ def _daily_forecast_table(df, days=10):
 
 
 def _daily_forecast_table_fetsund(df, days=10):
-    """
-    Daglig sammendragstabell for Fetsund lenser – viser vær relevant for
-    arrangementet: temperatur, vind, nedbør. Ingen oppvellings-analyse
-    (SE/S-vind er ikke relevant her).
-    """
     if df.empty:
         return None
     df = df.copy()
@@ -642,7 +577,6 @@ def _daily_forecast_table_fetsund(df, days=10):
 
 
 def _weather_fetsund_chart(df, title="Værvarsler – Fetsund"):
-    """Enkel kombinert graf: lufttemperatur + vind + nedbør for Fetsund."""
     if df.empty or 'wind_speed' not in df.columns:
         return None
     fig = make_subplots(
@@ -661,6 +595,243 @@ def _weather_fetsund_chart(df, title="Værvarsler – Fetsund"):
             x=df['time'], y=df['precipitation'], name='Nedbør',
             marker_color='rgba(70,130,180,0.6)'), row=3, col=1)
     fig.update_layout(title=title, height=520, showlegend=False, **_LAYOUT_BASE)
+    return fig
+
+
+# ============================================================================
+# FORECAST FUNCTIONS
+# ============================================================================
+
+def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
+                           hours_ahead=120, step_h=3):
+    """
+    Beregner tidsserie for predikert Fetsund-temperatur med usikkerhetsintervaller.
+
+    Usikkerhetsmodell
+    -----------------
+    Båndenebegynner med bredde 0 ved siste observerte Fetsund-temperatur og
+    vokser i to faser:
+      1. Lineær oppramp   (t = 0 → travel_h):   σ = MODEL_SIGMA × (h / travel_h)
+      2. Kvadratrot-vekst (t > travel_h):        σ = MODEL_SIGMA × √(1 + (h − travel_h) / 24)
+    Dette gir σ = 0 ved t = 0 og σ ≈ 2 °C ved transporttidshorisonten.
+
+    Predikert temperatur
+    --------------------
+    For hvert fremtidig tidspunkt t brukes faktisk Vorma-obs der data finnes
+    (≤ 2 timers toleranse), ellers ekstrapoleres siste anomali eksponentielt
+    (τ = 36 t). Lineær blending over transporttidsvinduet forankrer starten
+    i siste observerte Fetsund-temperatur for å unngå hopp.
+    """
+    MODEL_SIGMA = 2.0
+
+    travel_h, _, _ = calculate_travel_time(discharge_df)
+
+    if vorma_df is None or vorma_df.empty:
+        return pd.DataFrame()
+    if fetsund_df is None or fetsund_df.empty:
+        return pd.DataFrame()
+
+    fe = fetsund_df.copy()
+    fe['time'] = pd.to_datetime(fe['time'])
+    if fe['time'].dt.tz is None:
+        fe['time'] = fe['time'].dt.tz_localize('UTC')
+    fe = fe.sort_values('time')
+
+    vo = vorma_df.copy()
+    vo['time'] = pd.to_datetime(vo['time'])
+    if vo['time'].dt.tz is None:
+        vo['time'] = vo['time'].dt.tz_localize('UTC')
+    vo = vo.sort_values('time')
+
+    last_fetsund_obs  = fe.iloc[-1]['value']
+    last_fetsund_time = fe.iloc[-1]['time']
+    last_vorma_time   = vo.iloc[-1]['time']
+
+    # Vorma-baseline: median av siste 48 timer
+    cutoff_48h = last_vorma_time - timedelta(hours=48)
+    baseline   = vo.loc[vo['time'] >= cutoff_48h, 'value'].median()
+    if np.isnan(baseline):
+        baseline = vo['value'].median()
+
+    last_vorma_anomaly = vo.iloc[-1]['value'] - baseline
+
+    future_times = pd.date_range(
+        start=last_fetsund_time,
+        periods=hours_ahead // step_h + 1,
+        freq=f'{step_h}h',
+        tz='UTC',
+    )
+
+    rows = []
+    for t_fut in future_times:
+        h_elapsed = (t_fut - last_fetsund_time).total_seconds() / 3600
+
+        # ── Vorma-oppslag ─────────────────────────────────────────────────
+        vorma_lookup = t_fut - timedelta(hours=travel_h)
+        time_diffs   = (vo['time'] - vorma_lookup).abs()
+        nearest_idx  = time_diffs.idxmin()
+        gap_h        = time_diffs[nearest_idx].total_seconds() / 3600
+
+        if gap_h <= 2.0:
+            anomaly = vo.loc[nearest_idx, 'value'] - baseline
+        else:
+            # Eksponentiell demping av anomali der Vorma-data mangler
+            extrap_h = max(0.0, (vorma_lookup - last_vorma_time).total_seconds() / 3600)
+            anomaly  = last_vorma_anomaly * np.exp(-extrap_h / 36.0)
+
+        raw_pred = baseline + anomaly * TEMPERATURE_SURVIVAL
+
+        # ── Blending: siste Fetsund-obs → modellprediksjon ───────────────
+        alpha = min(1.0, h_elapsed / travel_h)
+        pred  = last_fetsund_obs * (1.0 - alpha) + raw_pred * alpha
+
+        # ── Usikkerhet ────────────────────────────────────────────────────
+        ramp   = min(1.0, h_elapsed / travel_h)
+        extrap = max(0.0, h_elapsed - travel_h)
+        sigma  = MODEL_SIGMA * ramp * np.sqrt(1.0 + extrap / 24.0)
+
+        rows.append({
+            'time':      t_fut,
+            'predicted': round(pred,          2),
+            'lower_68':  round(pred - sigma,        2),
+            'upper_68':  round(pred + sigma,        2),
+            'lower_95':  round(pred - 1.96 * sigma, 2),
+            'upper_95':  round(pred + 1.96 * sigma, 2),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
+                    title="Temperaturprognose – Fetsund"):
+    """
+    Kombinert Plotly-graf: historiske Fetsund-målinger + prediksjon med
+    usikkerhetsbånd (68 % og 95 % KI). Båndenebegynner i null-bredde ved
+    siste observasjon og vokser med tid.
+    """
+    fig = go.Figure()
+
+    # ── Fargebakgrunn per risikonivå ──────────────────────────────────────────
+    risk_zones = [
+        (24, 28, "rgba(23,162,184,0.07)"),
+        (20, 24, "rgba(40,167,69,0.09)"),
+        (18, 20, "rgba(240,165,0,0.09)"),
+        (16, 18, "rgba(200,100,0,0.12)"),
+        (14, 16, "rgba(220,53,69,0.12)"),
+        ( 8, 14, "rgba(107,0,0,0.13)"),
+    ]
+    for y0, y1, color in risk_zones:
+        fig.add_hrect(y0=y0, y1=y1, fillcolor=color, line_width=0, layer="below")
+
+    threshold_labels = {
+        14: "14 °C – farlig",
+        16: "16 °C – FINA min.",
+        18: "18 °C",
+        20: "20 °C",
+        24: "24 °C – varmt",
+    }
+    for temp, label in threshold_labels.items():
+        fig.add_hline(
+            y=temp,
+            line_dash="dot",
+            line_color="rgba(110,110,110,0.28)",
+            line_width=0.8,
+            annotation_text=label,
+            annotation_position="right",
+            annotation_font_size=10,
+            annotation_font_color="rgba(110,110,110,0.65)",
+        )
+
+    # ── Prediksjonsintervaller ────────────────────────────────────────────────
+    if forecast_df is not None and not forecast_df.empty:
+        t_fwd = list(forecast_df['time'])
+        t_rev = list(forecast_df['time'])[::-1]
+
+        # 95 % KI (lyseblå fyll)
+        fig.add_trace(go.Scatter(
+            x         = t_fwd + t_rev,
+            y         = list(forecast_df['upper_95']) + list(forecast_df['lower_95'])[::-1],
+            fill      = 'toself',
+            fillcolor = 'rgba(56,141,228,0.10)',
+            line      = dict(color='rgba(0,0,0,0)', width=0),
+            name      = '95 % KI',
+            hoverinfo = 'skip',
+        ))
+
+        # 68 % KI (middelblå fyll)
+        fig.add_trace(go.Scatter(
+            x         = t_fwd + t_rev,
+            y         = list(forecast_df['upper_68']) + list(forecast_df['lower_68'])[::-1],
+            fill      = 'toself',
+            fillcolor = 'rgba(56,141,228,0.22)',
+            line      = dict(color='rgba(0,0,0,0)', width=0),
+            name      = '68 % KI',
+            hoverinfo = 'skip',
+        ))
+
+        # Predikert midtlinje
+        fig.add_trace(go.Scatter(
+            x          = forecast_df['time'],
+            y          = forecast_df['predicted'],
+            mode       = 'lines',
+            name       = 'Prediksjon',
+            line       = dict(color='#185FA5', width=2, dash='dash'),
+            customdata = forecast_df[['lower_68', 'upper_68',
+                                      'lower_95', 'upper_95']].values,
+            hovertemplate=(
+                '<b>Prediksjon</b>: %{y:.1f} °C<br>'
+                '68 % KI: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
+                '95 % KI: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
+                '<extra></extra>'
+            ),
+        ))
+
+        # Vertikale markørlinjer
+        now_ms     = pd.Timestamp.now(tz='UTC').timestamp() * 1000
+        horizon_ms = (pd.Timestamp.now(tz='UTC') +
+                      timedelta(hours=travel_hours)).timestamp() * 1000
+
+        fig.add_vline(
+            x=now_ms,
+            line_dash='dot', line_color='rgba(100,100,100,0.50)', line_width=1,
+            annotation_text='Nå',
+            annotation_position='top left',
+            annotation_font_size=11,
+            annotation_font_color='rgba(100,100,100,0.80)',
+        )
+        fig.add_vline(
+            x=horizon_ms,
+            line_dash='dot', line_color='rgba(56,141,228,0.45)', line_width=1,
+            annotation_text=f'Datahorisont (+{travel_hours:.0f} t)',
+            annotation_position='top right',
+            annotation_font_size=10,
+            annotation_font_color='rgba(56,141,228,0.75)',
+        )
+
+    # ── Historiske Fetsund-målinger (lagt til sist → øverst i stack) ──────────
+    if fetsund_obs_df is not None and not fetsund_obs_df.empty:
+        fig.add_trace(go.Scatter(
+            x             = fetsund_obs_df['time'],
+            y             = fetsund_obs_df['value'],
+            mode          = 'lines',
+            name          = 'Observert (Fetsund)',
+            line          = dict(color='#185FA5', width=2),
+            hovertemplate = '<b>Observert</b>: %{y:.1f} °C<extra></extra>',
+        ))
+
+    fig.update_layout(
+        title      = title,
+        xaxis_title = '',
+        yaxis      = dict(title='°C', range=[10, 28], fixedrange=True),
+        height     = 430,
+        hovermode  = 'x unified',
+        template   = 'plotly_white',
+        margin     = dict(l=50, r=90, t=50, b=40),
+        legend     = dict(
+            orientation='h', yanchor='bottom', y=1.02,
+            xanchor='center', x=0.5, font=dict(size=10),
+        ),
+    )
     return fig
 
 
@@ -733,7 +904,6 @@ def page_informasjon():
         **Prediksjonen er pålitelig når:**
         - Det er aktive målinger fra Svanefoss eller Funnefoss (april–september)
         - Du ønsker å vite omtrent hva temperaturen er ved Fetsund **i dag eller i morgen**
-          – for eksempel for en treningstur langs arrangementsdistansen
         - Det er innen **1–2 uker** før Glommadyppen
         """)
     with col4:
@@ -741,8 +911,6 @@ def page_informasjon():
         **Prediksjonen er *ikke* en langtidsprognose:**
         - Mange måneder før arrangementet reflekterer prediksjonen kun **nåværende
           forhold**, ikke hva som vil skje i august
-        - Prediksjonen bør tolkes som *«slik er det nå»*, ikke *«slik blir det
-          under Glommadyppen»* dersom det er langt til arrangement
         - Usikkerheten i prediksjonen er ±2–3 °C (95 % KI)
         """)
 
@@ -771,7 +939,11 @@ def page_informasjon():
 
 def page_prediksjon():
     st.title("Temperaturprediksjon")
-    st.markdown("Predikert vanntemperatur i Glomma basert på observasjoner i Mjøsa, Vorma og Glomma. Prediksjonen er laget for Glommadyppen men kan benyttes for andre aktiviteter i Glomma i sommermånedene")
+    st.markdown(
+        "Predikert vanntemperatur i Glomma basert på observasjoner i Mjøsa, Vorma og Glomma. "
+        "Prediksjonen er laget for Glommadyppen men kan benyttes for andre aktiviteter "
+        "i Glomma i sommermånedene."
+    )
 
     event_date = calculate_event_date(EVENT_YEAR)
     days_until = (event_date - pd.Timestamp.now(tz='UTC')).days
@@ -819,14 +991,18 @@ def page_prediksjon():
     data_age_days  = data_age_hours / 24
 
     if data_age_days > 7:
-        st.warning(f"⚠️ Siste Vorma-måling er {data_age_days:.1f} dager gammel – stasjonen kan være offline.")
+        st.warning(
+            f"⚠️ Siste Vorma-måling er {data_age_days:.1f} dager gammel – "
+            "stasjonen kan være offline."
+        )
 
     # ── Nåstatus ─────────────────────────────────────────────────────────────
     st.header("Nåværende status")
     c1, c2, c3, c4 = st.columns(4)
 
     latest_val = primary_df.iloc[-1]['value']
-    delta_24   = f"{latest_val - primary_df.iloc[-24]['value']:+.1f} °C (24t)" if len(primary_df) >= 24 else "–"
+    delta_24   = (f"{latest_val - primary_df.iloc[-24]['value']:+.1f} °C (24t)"
+                  if len(primary_df) >= 24 else "–")
     c1.metric("Vorma nå", f"{latest_val:.1f} °C", delta=delta_24)
 
     drop = detect_temperature_drop(primary_df, threshold_C=2.0, window_hours=6)
@@ -843,128 +1019,128 @@ def page_prediksjon():
     else:
         c3.metric("Vind (Mjøsa)", "N/A")
 
-    # Vis aktuell transporttid som fjerde metric
     t_hours, q_val, q_src = calculate_travel_time(ertesekken_q)
     c4.metric("Transporttid nå", f"{t_hours} t",
               help=f"t = 9700 / {q_val:.0f} m³/s ({q_src})")
 
     st.divider()
 
-    # ── Prediksjon ────────────────────────────────────────────────────────────
+    # ── Prediksjon for arrangementet ──────────────────────────────────────────
     st.header("Prediksjon for arrangementet")
 
-    # Beregn prediksjonsvindu og vis tydelig hvilken periode som gjelder
-    travel_hours_now, q_now_pred, _ = calculate_travel_time(ertesekken_q)
-    pred_valid_from = pd.Timestamp.now(tz='UTC')
-    pred_valid_to   = pred_valid_from + pd.Timedelta(hours=travel_hours_now)
-    pred_from_oslo  = pred_valid_from.tz_convert('Europe/Oslo')
-    pred_to_oslo    = pred_valid_to.tz_convert('Europe/Oslo')
+    travel_hours_now, _, _ = calculate_travel_time(ertesekken_q)
+    pred_valid_to  = (pd.Timestamp.now(tz='UTC') +
+                      pd.Timedelta(hours=travel_hours_now)).tz_convert('Europe/Oslo')
 
     if days_until > 14:
-        st.info(f"""
-        ℹ️ **Prediksjonen viser nåværende forhold – ikke en prognose for august**
-
-        Prediksjonen er basert på Vorma-målinger fra **nå**, og reflekterer forventet
-        temperatur ved Fetsund i løpet av de neste **{travel_hours_now:.0f} timene**
-        (dvs. frem til ca. {pred_to_oslo.strftime('%d.%m kl %H:%M')}).
-
-        Det er {days_until} dager til Glommadyppen ({oslo_dt.strftime('%-d. %B %Y')}).
-        Prediksjonen for selve arrangementsdagen vil først være meningsfull
-        ca. **1–2 uker før** arrangementet.
-        """)
+        st.info(
+            f"ℹ️ Prediksjonen viser nåværende forhold, ikke en prognose for august. "
+            f"Det er {days_until} dager til Glommadyppen "
+            f"({oslo_dt.strftime('%-d. %B %Y')}). "
+            f"Prediksjonen er gyldig frem til ca. "
+            f"{pred_valid_to.strftime('%-d. %b kl %H:%M')} "
+            f"(neste {travel_hours_now:.0f} timer)."
+        )
     else:
-        st.success(f"""
-        ✅ **Prediksjon for arrangementet** er nå aktiv ({days_until} dager igjen).
-        Prediksjonen er basert på Vorma-temperaturen {travel_hours_now:.0f} timer
-        før arrangementet ({oslo_dt.strftime('%-d. %B kl %H:%M')}).
-        """)
+        st.success(
+            f"✅ Prediksjon for arrangementet er aktiv ({days_until} dager igjen). "
+            f"Basert på Vorma-temperatur {travel_hours_now:.0f} timer før start."
+        )
 
     prediction = predict_fetsund_temperature(primary_df, ertesekken_q, event_date)
 
     if data_age_days > 30 and days_until > 30:
-        st.info("""
-        Sanntidsprediksjon krever ferske Vorma-målinger.
-        Prediksjonen aktiveres når stasjonen starter opp igjen (april 2026).
-        """)
+        st.info(
+            "Sanntidsprediksjon krever ferske Vorma-målinger. "
+            "Aktiveres når stasjonen starter opp igjen (april 2026)."
+        )
     elif prediction:
-        pred_temp = prediction['predicted_temp']
+        pred_temp  = prediction['predicted_temp']
+        sigma      = 2.0
+        lb         = pred_temp - 1.96 * sigma
+        ub         = pred_temp + 1.96 * sigma
         risk_label, risk_color, ws_label, ws_color, risk_details = \
             assess_risk_open_water(pred_temp, weather_mjosa)
 
-        st.markdown(f"""
-        <div style='background:{risk_color}; padding:20px; border-radius:12px;
-                    color:white; text-align:center; margin-bottom:16px;'>
-          <div style='font-size:0.85em; opacity:0.8; margin-bottom:2px;'>
-            Predikert temperatur ved Fetsund
-          </div>
-          <div style='font-size:3em; font-weight:700; line-height:1.1;'>
-            {pred_temp:.1f} °C
-          </div>
-          <div style='font-size:1.1em; margin-top:8px; font-weight:600;'>
-            {risk_label}
-          </div>
-          <div style='font-size:0.8em; opacity:0.85; margin-top:6px;'>
-            Gjelder: {pred_from_oslo.strftime('%-d. %b kl %H:%M')} –
-            {pred_to_oslo.strftime('%-d. %b kl %H:%M')}
-            (neste {travel_hours_now:.0f} timer)
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # ── Kompakt prediksjonsbrikke ─────────────────────────────────────
+        st.markdown(
+            f"""
+            <div style="
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                border-left: 5px solid {risk_color};
+                border-radius: 8px;
+                padding: 12px 18px;
+                background: {risk_color}14;
+                margin-bottom: 12px;
+            ">
+                <div style="text-align:center; min-width:72px;">
+                    <div style="font-size:2.0em; font-weight:700;
+                                color:{risk_color}; line-height:1.1;">
+                        {pred_temp:.1f}°C
+                    </div>
+                    <div style="font-size:11px; color:#888; margin-top:2px;">
+                        Fetsund
+                    </div>
+                </div>
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:600; font-size:0.95em;">
+                        {risk_label}
+                    </div>
+                    <div style="font-size:0.82em; color:#666; margin-top:3px;">
+                        🏊 {ws_label}
+                        &nbsp;·&nbsp;
+                        95&nbsp;%&nbsp;KI:&nbsp;{lb:.1f}–{ub:.1f}&nbsp;°C
+                        &nbsp;·&nbsp;
+                        Transporttid:&nbsp;{prediction['travel_hours']:.0f}&nbsp;t
+                        &nbsp;({prediction['q_source']})
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        st.markdown(f"""
-        <div style='background:{ws_color}; padding:10px 16px; border-radius:8px;
-                    color:white; display:inline-block; font-weight:600;
-                    font-size:1.05em; margin-bottom:16px;'>
-          🏊 Våtdrakt: {ws_label}
-        </div>
-        """, unsafe_allow_html=True)
-
-        with st.expander("Vis risikovurdering og Open Water-regler (draft)", expanded=False):
+        with st.expander("Vis detaljer og risikovurdering", expanded=False):
             for d in risk_details:
                 st.markdown(f"- {d}")
             st.markdown("---")
-            st.markdown("""
-            **Temperaturgrenser (World Aquatics / FINA):**
-            | Temp | Vurdering | Våtdrakt |
-            |------|-----------|----------|
-            | < 14 °C | Svømming bør ikke gjennomføres | Ikke aktuelt |
-            | 14–16 °C | Høy risiko | Obligatorisk |
-            | 16–18 °C | Moderat risiko | Sterkt anbefalt |
-            | 18–20 °C | Lav risiko | Anbefalt |
-            | 20–24 °C | Gode forhold | Valgfritt |
-            | > 24 °C | Varmt vann | Frarådes |
-            """)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Vorma (oppstrøms)", f"{prediction['vorma_temp']:.1f} °C")
-        c2.metric("Baseline (48t snitt)", f"{prediction['baseline_temp']:.1f} °C")
-        c3.metric("Transporttid brukt",
-                  f"{prediction['travel_hours']} t",
-                  help=f"t = 9700 / {prediction['q_used']:.0f} m³/s — {prediction['q_source']}")
-        c4.metric("Pålitelighet", f"{prediction['confidence']*100:.0f} %")
-
-        std_err = 2.0
-        margin  = std_err * 1.96
-        st.info(f"""
-        **95 % konfidensintervall:** {pred_temp - margin:.1f} – {pred_temp + margin:.1f} °C
-
-        Modell: t = 9700 / {prediction['q_used']:.0f} = **{prediction['travel_hours']} t** transporttid
-        ({prediction['q_source']}) · 14 % kaldtvann · {len(primary_df)} målinger
-        """)
-        st.warning("⚠️ Modellen er validert opp mot data fra juli og august. Bruk med forsiktighet utenfor sommermånedene.")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Vorma (oppstrøms)",  f"{prediction['vorma_temp']:.1f} °C")
+            c2.metric("Baseline (48t)",      f"{prediction['baseline_temp']:.1f} °C")
+            c3.metric("Transporttid brukt",  f"{prediction['travel_hours']} t",
+                      help=f"t = 9700 / {prediction['q_used']:.0f} m³/s")
+            c4.metric("Pålitelighet",        f"{prediction['confidence']*100:.0f} %")
+            st.caption(
+                "⚠️ Modellen er validert mot data fra juli og august. "
+                "Bruk med forsiktighet utenfor sommermånedene."
+            )
     else:
         st.warning("⚠️ Ikke nok data for prediksjon.")
 
     st.divider()
 
-    st.subheader("Temperaturhistorikk – siste 7 dager")
-    temp_fig = _temp_chart({
-        'Svanefoss': svanefoss_temp,
-        'Blaker':    blaker_temp,
-        'Fetsund':   fetsund_temp,
-    }, "Vanntemperatur (siste 7 dager)")
-    st.plotly_chart(temp_fig, use_container_width=True)
+    # ── Temperaturprognose (historikk + fremtid) ──────────────────────────────
+    st.subheader("Temperaturprognose – Fetsund")
 
+    forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q)
+    travel_h_now, _, _ = calculate_travel_time(ertesekken_q)
+
+    if not forecast_df.empty:
+        fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now)
+        st.plotly_chart(fig_fc, use_container_width=True)
+        st.caption(
+            "Solid linje: observert · Stiplet linje: prediksjon · "
+            "68 % og 95 % KI starter med bredde 0 ved siste observasjon. "
+            "Datahorisonten markerer der Vorma-observasjoner gir direkte grunnlag "
+            f"(σ ≈ 2 °C). Etter dette ekstrapoleres Vorma-anomalien med "
+            "eksponentiell demping og usikkerheten vokser tilsvarende."
+        )
+    else:
+        st.warning("Ikke nok data for prognosevisning.")
+
+    # ── Vindvarsel Mjøsa ──────────────────────────────────────────────────────
     if not weather_mjosa.empty:
         st.divider()
         st.subheader("Vindvarsel – Mjøsa (5 dager)")
@@ -1020,39 +1196,35 @@ def page_data_varsel():
     # ── TAB 1: Vanntemperatur ─────────────────────────────────────────────────
     with tabs[0]:
         st.subheader("Vanntemperatur – siste 7 dager (NVE HydAPI)")
-        st.caption("Timesverdier fra stasjonene langs Vorma og Glomma. Bare data med de to høyeste kvalitetene vises.")
+        st.caption("Timesverdier fra stasjonene langs Vorma og Glomma.")
 
         c1, c2, c3, c4 = st.columns(4)
         def _latest(df, label, col):
-            if df.empty:
-                col.metric(label, "N/A")
-            else:
-                col.metric(label, f"{df.iloc[-1]['value']:.1f} °C")
+            if df.empty: col.metric(label, "N/A")
+            else:        col.metric(label, f"{df.iloc[-1]['value']:.1f} °C")
         _latest(sv_temp, "Svanefoss (Vorma)", c1)
         _latest(fn_temp, "Funnefoss (Vorma)", c2)
         _latest(bl_temp, "Blaker (Glomma)",   c3)
         _latest(fe_temp, "Fetsund (Glomma)",  c4)
 
         fig = _temp_chart({
-            'Svanefoss': sv_temp,
-            'Funnefoss': fn_temp,
-            'Blaker':    bl_temp,
-            'Fetsund':   fe_temp,
+            'Svanefoss': sv_temp, 'Funnefoss': fn_temp,
+            'Blaker':    bl_temp, 'Fetsund':   fe_temp,
         }, "Vanntemperatur – siste 7 dager")
         st.plotly_chart(fig, use_container_width=True)
 
         st.caption("""
-        **Stasjoner:**  
-        - **Svanefoss** (2.52.0) — i Vorma, 22 km fra Mjøsa.  
-        - **Funnefoss** (2.410.0) — i Vorma ca. 23,5 km fra Mjøsa.  
-        - **Blaker** (2.17.0) — i Glomma, primær målestasjon.  
-        - **Fetsund** (2.587.0) — Målgang Glommadyppen.
+        **Stasjoner:**
+        Svanefoss (2.52.0) i Vorma 22 km fra Mjøsa ·
+        Funnefoss (2.410.0) i Vorma 23,5 km fra Mjøsa ·
+        Blaker (2.17.0) i Glomma nedenfor samløp ·
+        Fetsund (2.587.0) målgang Glommadyppen.
         """)
 
     # ── TAB 2: Vannføring ─────────────────────────────────────────────────────
     with tabs[1]:
         st.subheader("Vannføring – siste 7 dager (NVE HydAPI)")
-        st.caption("Timesverdier i m³/s. Vannføring forbi Ertesekken brukes for å beregne transporttid t = 9700/Q.")
+        st.caption("Timesverdier i m³/s. Ertesekken brukes for transporttid t = 9700/Q.")
 
         c1, c2, c3 = st.columns(3)
         def _latest_q(df, label, col):
@@ -1068,9 +1240,7 @@ def page_data_varsel():
         _latest_q(bl_q, "Blaker (Glomma)",    c3)
 
         fig = _discharge_chart({
-            'Ertesekken': er_q,
-            'Funnefoss':  fn_q,
-            'Blaker':     bl_q,
+            'Ertesekken': er_q, 'Funnefoss': fn_q, 'Blaker': bl_q,
         }, "Vannføring – siste 7 dager")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1080,22 +1250,15 @@ def page_data_varsel():
                           min_value=100, max_value=1200,
                           value=int(q_now), step=10)
         t_calc = round(TRANSPORT_COEFF / q_val, 1)
-        st.info(f"""
-        **t = 9700 / {q_val} = {t_calc} timer** (Svanefoss → Fetsund, 45 km)  
-        *(t = 6871 / Q for Svanefoss → Blaker)*
-        """)
-
-        st.caption("""
-        **Stasjoner:**  
-        - **Ertesekken** (2.197.0) — Vorma, nøkkelstasjon for transporttidsmodellen.  
-        - **Funnefoss kraftverk** (2.412.0) — Glomma, oppstrøms samløp med Vorma.  
-        - **Blaker** (2.17.0) — Glomma, nedenfor samløp (typisk 1,45 × Ertesekken).
-        """)
+        st.info(
+            f"**t = 9700 / {q_val} = {t_calc} timer** (Svanefoss → Fetsund, 45 km)  \n"
+            "*(t = 6871 / Q for Svanefoss → Blaker)*"
+        )
 
     # ── TAB 3: Vind ved Mjøsa ─────────────────────────────────────────────────
     with tabs[2]:
         st.subheader("Vindmålinger – Kise, søndre Mjøsa (siste 7 dager)")
-        st.caption(f"Kilde: MET.no Frost API · Stasjon {FROST_STATION_KISE} (Kise) · Timesverdier.")
+        st.caption(f"Kilde: MET.no Frost API · Stasjon {FROST_STATION_KISE} · Timesverdier.")
 
         if frost_vind.empty:
             st.warning("Vindmålinger fra Frost API ikke tilgjengelig.")
@@ -1107,9 +1270,9 @@ def page_data_varsel():
                 ses_hours = int(is_ses.sum())
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Vindhastighet nå",       f"{frost_vind.iloc[-1]['wind_speed']:.1f} m/s")
-                c2.metric("Gj.snitt total (7d)",    f"{frost_vind['wind_speed'].mean():.1f} m/s")
-                c3.metric("Timer SE/S-vind",         f"{ses_hours} t")
+                c1.metric("Vindhastighet nå",    f"{frost_vind.iloc[-1]['wind_speed']:.1f} m/s")
+                c2.metric("Gj.snitt total (7d)", f"{frost_vind['wind_speed'].mean():.1f} m/s")
+                c3.metric("Timer SE/S-vind",      f"{ses_hours} t")
                 if avg_ses >= CRITICAL_WIND_SPEED:
                     c4.metric("Gj.snitt SE/S", f"{avg_ses:.1f} m/s",
                               delta="⚠️ Over terskel", delta_color="inverse")
@@ -1122,7 +1285,8 @@ def page_data_varsel():
 
             with st.expander("Vis rådata (Frost API)", expanded=False):
                 disp = frost_vind.copy()
-                disp['time'] = disp['time'].dt.tz_convert('Europe/Oslo').dt.strftime('%Y-%m-%d %H:%M')
+                disp['time'] = (disp['time'].dt.tz_convert('Europe/Oslo')
+                                            .dt.strftime('%Y-%m-%d %H:%M'))
                 st.dataframe(disp, use_container_width=True)
 
     # ── TAB 4: Værvarsler ─────────────────────────────────────────────────────
@@ -1163,8 +1327,8 @@ def page_data_varsel():
                     st.plotly_chart(chart, use_container_width=True)
 
         st.info("""
-        **Om oppvellings-indikatoren (SE/S-vind):**  
-        🟢 Lav risiko (< 1,2 m/s) · 🟡 Moderat (1,2–1,9 m/s) · 🔴 Høy (≥ 1,9 m/s vedvarende SE/S-vind)  
+        **Om oppvellings-indikatoren (SE/S-vind):**
+        🟢 Lav risiko (< 1,2 m/s) · 🟡 Moderat (1,2–1,9 m/s) · 🔴 Høy (≥ 1,9 m/s vedvarende SE/S-vind)
         Vind over tid fra sørøst–sør (135–225°) kan føre til kaldt vann fra Mjøsa til Glomma.
         """)
 
@@ -1175,11 +1339,11 @@ def page_data_varsel():
 
 def main():
     with st.sidebar:
-        # Klikkbar logo → glommadyppen.no
         st.markdown(
             '<a href="https://glommadyppen.no" target="_blank">'
             + '<img src="data:image/jpeg;base64,{}" style="width:100%;cursor:pointer;">'
-            .format(__import__('base64').b64encode(open('Samensatt_logo_GlommDyppen.jpg','rb').read()).decode())
+            .format(__import__('base64').b64encode(
+                open('Samensatt_logo_GlommDyppen.jpg', 'rb').read()).decode())
             + '</a>',
             unsafe_allow_html=True
         )
