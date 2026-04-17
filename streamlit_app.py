@@ -1,6 +1,6 @@
 """
-Glommadyppen Vanntemperatur Prediksjon
-Real-time water temperature prediction for Glommadyppen swimming event
+GlommaDyppen Vanntemperatur Prediksjon
+Real-time water temperature prediction for GlommaDyppen swimming event
 
 Author: Anton Vooren
 Date: 2026
@@ -20,7 +20,7 @@ from plotly.subplots import make_subplots
 # ============================================================================
 
 st.set_page_config(
-    page_title="Glommadyppen Temperatur",
+    page_title="GlommaDyppen Temperatur",
     page_icon="🏊‍♂️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -184,7 +184,7 @@ def fetch_weather_forecast(lat, lon, days_ahead=14):
     """Henter varsel fra Met.no Locationforecast."""
     try:
         url     = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
-        headers = {"User-Agent": "GlommadyppenApp/1.0 kontakt@glommadyppen.no"}
+        headers = {"User-Agent": "GlommaDyppenApp/1.0 stevne@fetsk.no"}
         params  = {"lat": lat, "lon": lon}
         response = requests.get(url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
@@ -1099,158 +1099,17 @@ def _wind_energy_chart(energy_df,
 
 
 # ============================================================================
-# HISTORISK EPISODE – 2023
-# ============================================================================
-
-def _episode_chart_2023():
-    """
-    Dual-akse Plotly-graf med hardkodet data fra oppvellingstidsoden juli 2023.
-
-    Kilde: CERRA reanalysevinddata (3-timers oppløsning, dt=1 per obs → terskel 70 m·h)
-    og NVE HydAPI-temperaturer fra Fetsund bru (2.587.0).
-
-    Hendelsesforløp:
-      – 10–12. juli: E bygger opp fra ~31 til ~50 m·h; Fetsund kjøles ned fra 18 → 15 °C
-      – 13. juli:    E krysser 70 m·h-terskelen; Fetsund faller til 11 °C (kaldt!)
-      – 14–17. juli: E eskalerer til topp på 120 m·h; Fetsund holder seg på 11–14 °C
-      – 18–21. juli: Vinden stilner; E avtar raskt ettersom eldre hendelser «faller ut»
-      – 23–25. juli: E tilbake under 30 m·h; Fetsund restituerer til 16 °C
-      – 5. august:   Arrangementet gjennomføres – E = 36 m·h, Fetsund 17 °C
-    """
-    # ── Daglige datapunkter (CERRA/NVE, 10. juli – 8. august 2023) ───────────
-    dates = [
-        '10.7', '11.7', '12.7', '13.7', '14.7', '15.7', '16.7', '17.7',
-        '18.7', '19.7', '20.7', '21.7', '22.7', '23.7', '24.7', '25.7',
-        '26.7', '27.7', '28.7', '29.7', '30.7', '31.7',
-        '1.8',  '2.8',  '3.8',  '4.8',  '5.8',  '6.8',  '7.8',  '8.8',
-    ]
-    # Rullende 7-dagers kumulativ SE/S-vindenergi (CERRA, m·h)
-    E = [31.0, 35.7, 49.6, 69.3, 75.1, 79.1, 104.1, 119.8,
-         118.7, 100.9, 86.6, 67.4, 61.4, 58.7, 29.3, 12.6,
-         21.2, 22.7, 26.5, 33.5, 41.8, 50.4,
-         50.4, 43.4, 38.7, 37.2, 35.7, 27.8, 17.0, 10.1]
-    # Fetsund vanntemperatur (NVE, °C) – None = ingen obs denne dagen
-    T = [18.0, 18.0, 15.0, 11.0, 11.0, None, None, 14.0,
-         None, 11.0, 11.5, None, None, 16.0, 16.0, 16.0,
-         None, None, 16.0, 16.0, None, 16.0,
-         15.0, 15.5, None, 17.0, 17.0, 17.0, 16.0, None]
-
-    THRESH = 70.0   # CERRA-konvensjon (dt=1 per 3t-obs)
-    EVENT_IDX = dates.index('5.8')   # arrangementet
-
-    fig = make_subplots(specs=[[{'secondary_y': True}]])
-
-    # ── Risikosoner (bakgrunn) ────────────────────────────────────────────────
-    fig.add_hrect(y0=THRESH, y1=135, fillcolor='rgba(220,53,69,0.08)',
-                  line_width=0, secondary_y=False)
-    fig.add_hrect(y0=0, y1=THRESH, fillcolor='rgba(40,167,69,0.06)',
-                  line_width=0, secondary_y=False)
-
-    # ── E-tidsserie (areal) ───────────────────────────────────────────────────
-    # Fargelegg oransje der E > terskel, grønn der E ≤ terskel
-    e_above = [v if v >= THRESH else None for v in E]
-    e_below = [min(v, THRESH) for v in E]
-
-    fig.add_trace(go.Scatter(
-        x=dates, y=e_below,
-        fill='tozeroy', fillcolor='rgba(40,167,69,0.20)',
-        line=dict(color='rgba(0,0,0,0)', width=0),
-        name='E < terskel', hoverinfo='skip',
-    ), secondary_y=False)
-
-    fig.add_trace(go.Scatter(
-        x=dates, y=[v if v is not None else THRESH for v in e_above],
-        fill='tozeroy', fillcolor='rgba(220,53,69,0.22)',
-        line=dict(color='rgba(0,0,0,0)', width=0),
-        name='E > terskel', hoverinfo='skip',
-    ), secondary_y=False)
-
-    fig.add_trace(go.Scatter(
-        x=dates, y=E,
-        mode='lines', name='Vindenergi E (m·h)',
-        line=dict(color='#BA7517', width=2),
-        hovertemplate='<b>E</b>: %{y:.1f} m·h<extra></extra>',
-    ), secondary_y=False)
-
-    # ── Terskel ───────────────────────────────────────────────────────────────
-    fig.add_hline(y=THRESH, line_dash='dot', line_color='rgba(163,45,45,0.60)',
-                  line_width=1.2, secondary_y=False,
-                  annotation_text='70 m·h – oppvellingsterskel',
-                  annotation_position='top right',
-                  annotation_font_size=10,
-                  annotation_font_color='rgba(163,45,45,0.80)')
-
-    # ── Fetsund-temperatur (linje) ────────────────────────────────────────────
-    fig.add_trace(go.Scatter(
-        x=dates, y=T,
-        mode='lines+markers', name='Fetsund vanntemp. (°C)',
-        line=dict(color='#185FA5', width=2.5),
-        marker=dict(size=6, color='#185FA5'),
-        connectgaps=False,
-        hovertemplate='<b>Fetsund</b>: %{y:.1f} °C<extra></extra>',
-    ), secondary_y=True)
-
-    # ── FINA-grenser på temp-aksen ────────────────────────────────────────────
-    for temp, label in [(14, '14 °C – farlig'), (16, '16 °C – FINA min.'), (18, '18 °C')]:
-        fig.add_hline(y=temp, line_dash='dot',
-                      line_color='rgba(110,110,110,0.25)', line_width=0.8,
-                      secondary_y=True,
-                      annotation_text=label,
-                      annotation_position='left',
-                      annotation_font_size=9,
-                      annotation_font_color='rgba(110,110,110,0.60)')
-
-    # ── Arrangementsdato-markør ───────────────────────────────────────────────
-    fig.add_vline(x=dates[EVENT_IDX],
-                  line_dash='dot', line_color='rgba(40,130,60,0.65)', line_width=1.5,
-                  annotation_text='Arrangement<br>5. august',
-                  annotation_position='top right',
-                  annotation_font_size=11,
-                  annotation_font_color='rgba(30,110,50,0.85)')
-
-    # ── Annotasjoner for nøkkelmomenter ───────────────────────────────────────
-    fig.add_annotation(x='17.7', y=119.8, yref='y',
-                       text='Topp: 120 m·h',
-                       showarrow=True, arrowhead=2, arrowcolor='#854F0B',
-                       ax=0, ay=-32, font=dict(size=10, color='#633806'))
-    fig.add_annotation(x='13.7', y=11.0, yref='y2',
-                       text='Fetsund: 11 °C',
-                       showarrow=True, arrowhead=2, arrowcolor='#185FA5',
-                       ax=35, ay=0, font=dict(size=10, color='#0C447C'))
-    fig.add_annotation(x='5.8', y=17.0, yref='y2',
-                       text='17 °C ✓',
-                       showarrow=True, arrowhead=2, arrowcolor='rgba(30,110,50,0.8)',
-                       ax=-35, ay=0, font=dict(size=10, color='rgba(30,110,50,0.9)'))
-
-    fig.update_layout(
-        title='Historisk episode: oppvelling i Mjøsa og temperaturfall i Glomma, juli 2023',
-        xaxis=dict(title='', tickangle=-35, tickfont=dict(size=10)),
-        hovermode='x unified',
-        template='plotly_white',
-        height=430,
-        margin=dict(l=60, r=80, t=50, b=60),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                    xanchor='center', x=0.5, font=dict(size=10)),
-    )
-    fig.update_yaxes(title_text='Kumulativ vindenergi E (m·h)', range=[0, 135],
-                     secondary_y=False, gridcolor='rgba(0,0,0,0.06)')
-    fig.update_yaxes(title_text='Fetsund vanntemperatur (°C)',  range=[8, 22],
-                     secondary_y=True, gridcolor='rgba(0,0,0,0)')
-    return fig
-
-
-# ============================================================================
 # PAGE: INFORMASJON
 # ============================================================================
 
 def page_informasjon():
-    st.title("Om Glommadyppen Temperaturvarsel")
+    st.title("Om temperaturvarsel for svømming i Glomma og GlommaDyppen")
 
     st.markdown("""
-    Glommadyppen er et åpent vannsvømmearrangement fra Bingsfossen til Fetsund lenser
-    langs Glomma, arrangert av Fet Svømmeklubb den første lørdagen i august hvert år.
-    Distansen er ca. 14 km og gjennomføres uansett vær – men temperaturen i vannet
-    kan variere mye fra år til år, og påvirker både sikkerhet og regelverk for våtdrakt.
+    GlommaDyppen er et Open Water arrangement fra Bingsfossen til Fetsund lenser
+    langs Glomma, arrangert av Fetsund Lenser, Fet Svømmeklubb og Sørumsand IF Svømmegruppe den første lørdagen i august hvert år.
+    Distansen på den lengste øvelsen, Fløter'n, er 11 km og gjennomføres uansett vær – men temperaturen i vannet
+    kan variere mye fra år til år hvilket påvirker sikkerheten.
 
     Denne siden er laget for å gi arrangører og deltakere bedre grunnlag for å
     planlegge arrangement og treningsturer.
@@ -1265,7 +1124,7 @@ def page_informasjon():
         st.markdown("""
         Kaldt vann fra Mjøsas dyplag kan nå Glomma ved Fetsund gjennom en kjede av hendelser:
 
-        1. **Sørøst/sør-vind** over Mjøsa skaper Ekman-transport som presser overflatevann
+        1. **Sørøst/sørlig vind** over en viss hastighet og tid ved sørenden av Mjøsa skaper Ekman-transport som presser overflatevann
            mot nordenden av innsjøen og drar kaldt bunnvann (hypolimnion) opp i sør.
         2. Det kalde vannet strømmer ut i **Vorma ved Minnesund** og transporteres
            sørover i elven.
@@ -1274,19 +1133,19 @@ def page_informasjon():
         4. Her blandes det med Glomma-vannet: bare **~14 %** av temperaturavviket
            overlever fortynningen/dispersjon og når Fetsund.
 
-        Effekten kan likevel gi temperaturfall på 3–5 °C ved arrangementet i år med
-        kraftig og vedvarende sørlig vind.
+        Effekten kan gi temperaturfall på 3–5 °C ved arrangementet ved
+        kraftig og vedvarende sørøst/sørlig vind.
         """)
 
     with col2:
         st.subheader("📡 Datakilder")
         st.markdown("""
         **NVE HydAPI** – timesverdier for vanntemperatur og vannføring:
-        - Svanefoss (2.52.0) — Vorma, 22 km fra Mjøsa
-        - Funnefoss (2.410.0) — Vorma, 23,5 km fra Mjøsa
-        - Ertesekken (2.197.0) — Vorma, vannføring (brukes i transporttidsmodellen)
-        - Blaker (2.17.0) — Glomma, nedenfor samløpet
-        - Fetsund (2.587.0) — Målgang / arrangementspunkt
+        - Svanefoss (2.52.0) — Vorma, vanntemperatur, ca. 22 km nedenfor Mjøsa
+        - Ertesekken (2.197.0) — Vorma, vannføring, ca. 21 km nedenfor Mjøsa
+        - Funnefoss (2.410.0) — Glomma, vannføring og vanntemperatur, ca. 7 km ovenfor samløpet med Vorma
+        - Blaker (2.17.0) — Glomma, vanntemperatur og vannføring, ca, 21 km nedenfor samløpet
+        - Fetsund (2.587.0) — Glomma, vanntemperatur, Målgang / arrangementspunkt
 
         **MET Frost API** – historiske vindmålinger fra Kise (SN12680) ved søndre Mjøsa.
 
@@ -1308,7 +1167,7 @@ def page_informasjon():
         **Prediksjonen er pålitelig når:**
         - Det er aktive målinger fra Svanefoss eller Funnefoss (april–september)
         - Du ønsker å vite omtrent hva temperaturen er ved Fetsund **i dag eller i morgen**
-        - Det er innen **1–2 uker** før Glommadyppen
+        - Det er innen **1–2 uker** før GlommaDyppen eller i sommermånedene for treningssvømming
         """)
     with col4:
         st.markdown("""
@@ -1336,34 +1195,6 @@ def page_informasjon():
     og toleranse for kaldt vann uavhengig av regelverket.
     """)
 
-    st.divider()
-
-    st.subheader("📊 Historisk eksempel: oppvellingsepsioden juli 2023")
-    st.markdown("""
-    Sommeren 2023 illustrerer godt hvordan vindenergi og vanntemperatur henger sammen.
-    En langvarig periode med sørøst- og sørlig vind over Mjøsa fra 10. til 17. juli
-    bygget opp akkumulert vindenergi til hele **120 m·h** — nesten dobbelt så mye som
-    oppvellingsterskelen på 70 m·h. Kaldt bunnvann fra Mjøsa strømmet ut i Vorma
-    og nådde Fetsund med rundt 25 timers forsinkelse, der temperaturen falt til **11 °C**.
-
-    Deretter stilnet vinden. Ettersom de gamle vindpulsene gradvis «falt ut» av det
-    rullende 7-dagers vinduet, sank energiverdien raskt. Innen 24–25. juli var
-    temperaturen tilbake på 16 °C — og da Glommadyppen ble avholdt **5. august**
-    viste Fetsund **17 °C** og E lå på beskjedne 36 m·h. Arrangementet gikk som planlagt.
-
-    Grafen under viser energioppbyggingen (oransje = over terskel, grønn = under),
-    temperaturkurven ved Fetsund og arrangementstidspunktet.
-    """)
-
-    st.plotly_chart(_episode_chart_2023(), use_container_width=True)
-
-    st.caption(
-        "Kilde: CERRA reanalysevinddata (Kise, 60.78°N 10.72°E, 3-timers oppløsning) og "
-        "NVE HydAPI temperaturmålinger fra Fetsund bru (2.587.0). "
-        "E = rullende 7-dagers kumulativ SE/S-vindenergi, dt=1 per observasjon, terskel 70 m·h. "
-        "Temperaturobservasjoner er sporadiske (NVE-stasjonen var delvis offline i perioden)."
-    )
-
 
 # ============================================================================
 # PAGE: PREDIKSJON
@@ -1373,7 +1204,7 @@ def page_prediksjon():
     st.title("Temperaturprediksjon")
     st.markdown(
         "Predikert vanntemperatur i Glomma basert på observasjoner i Mjøsa, Vorma og Glomma. "
-        "Prediksjonen er laget for Glommadyppen men kan benyttes for andre aktiviteter "
+        "Prediksjonen er laget for GlommaDyppen, men kan benyttes for andre aktiviteter "
         "i Glomma i sommermånedene."
     )
 
@@ -1468,7 +1299,7 @@ def page_prediksjon():
     if days_until > 14:
         st.info(
             f"ℹ️ Prediksjonen viser nåværende forhold, ikke en prognose for august. "
-            f"Det er {days_until} dager til Glommadyppen "
+            f"Det er {days_until} dager til GlommaDyppen "
             f"({oslo_dt.strftime('%-d. %B %Y')}). "
             f"Prediksjonen er gyldig frem til ca. "
             f"{pred_valid_to.strftime('%-d. %b kl %H:%M')} "
@@ -1691,7 +1522,7 @@ def page_data_varsel():
         Svanefoss (2.52.0) i Vorma 22 km fra Mjøsa ·
         Funnefoss (2.410.0) i Vorma 23,5 km fra Mjøsa ·
         Blaker (2.17.0) i Glomma nedenfor samløp ·
-        Fetsund (2.587.0) målgang Glommadyppen.
+        Fetsund (2.587.0) målgang GlommaDyppen.
         """)
 
     # ── TAB 2: Vannføring ─────────────────────────────────────────────────────
@@ -1850,7 +1681,7 @@ def main():
             st.rerun()
         st.caption(
             f"Oppdatert {pd.Timestamp.now(tz='Europe/Oslo').strftime('%d.%m.%Y %H:%M')} | "
-            "Utviklet av Fet Svømmeklubb for Glommadyppen.no"
+            "Utviklet av Fet Svømmeklubb for GlommaDyppen.no"
         )
 
     if page == "Om siden":
