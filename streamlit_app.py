@@ -684,11 +684,25 @@ def build_wind_energy_series(frost_df, forecast_df,
     df['v_ses']     = np.where(df['is_ses'], df['wind_speed'], 0.0)
     df['e_contrib'] = df['v_ses'] * df['dt']
 
+    # Dedupliser tidsstempler (kan oppstå i overlapp mellom Frost-obs og Met.no-prognose).
+    # Behold siste rad per tidsstempel; obs ble lagt inn først og sort er stabil,
+    # så 'last' gir faktisk observasjonen forrang fremfor prognose.
+    df = df.drop_duplicates(subset='time', keep='last').reset_index(drop=True)
+
     df_idx = df.set_index('time')
     df_idx['E_raw'] = (df_idx['e_contrib']
                        .rolling(f'{window_hours}h', min_periods=1)
                        .sum())
-    df_idx['E'] = df_idx['E_raw'].shift(freq=f'{lead_hours}h').round(2)
+
+    # shift(freq=...) krever unik datetimeindex. Etter dedup er dette garantert,
+    # men som ekstra sikkerhet faller vi tilbake til integer-shift ved ValueError.
+    try:
+        df_idx['E'] = df_idx['E_raw'].shift(freq=f'{lead_hours}h').round(2)
+    except ValueError:
+        median_dt = float(df['dt'].median()) or 1.0
+        n_shift   = max(1, round(lead_hours / median_dt))
+        df_idx['E'] = df_idx['E_raw'].shift(n_shift).round(2)
+
     df = df_idx[['wind_speed', 'wind_direction', 'is_forecast',
                  'v_ses', 'e_contrib', 'dt', 'E']].reset_index()
     df['E'] = df['E'].fillna(0.0)
