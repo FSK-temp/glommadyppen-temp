@@ -1084,15 +1084,13 @@ def page_prediksjon():
         st.error("Ingen Vorma-data tilgjengelig. Sjekk NVE HydAPI.")
         return
 
-    data_age_days = (pd.Timestamp.now(tz='UTC') -
-                     pd.to_datetime(primary_df['time'].max()).tz_localize('UTC')
-                     if primary_df['time'].max().tzinfo is None
-                     else pd.Timestamp.now(tz='UTC') -
-                     pd.to_datetime(primary_df['time'].max())).total_seconds() / 86400
+    _last_t = pd.to_datetime(primary_df['time'].max())
+    if _last_t.tzinfo is None:
+        _last_t = _last_t.tz_localize('UTC')
+    data_age_days = (pd.Timestamp.now(tz='UTC') - _last_t).total_seconds() / 86400
 
     c3.metric("Siste Vorma-data",
-              pd.to_datetime(primary_df['time'].max())
-              .tz_localize('UTC').tz_convert('Europe/Oslo').strftime('%d.%m %H:%M'))
+              _last_t.tz_convert('Europe/Oslo').strftime('%d.%m %H:%M'))
     c4.metric("Dataalder", f"{data_age_days:.1f} dager",
               delta="⚠️ Gamle data" if data_age_days > 2 else None,
               delta_color="inverse")
