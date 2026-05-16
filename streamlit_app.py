@@ -373,7 +373,7 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
     for vurdering av gjennomføring, men kan skjønnsmessig justere den nedre
     grensen basert på helhetsvurdering (vær, sikt, strøm, deltakermassen).
     """
-    WETSUIT_ALWAYS = "Våtdrakt obligatorisk (Glommadyppen)"
+    WETSUIT_ALWAYS = "🧥 Obligatorisk (Glommadyppen-regel)"
     WETSUIT_COLOR  = "#2c6e9e"
 
     southerly_risk = False
@@ -426,7 +426,7 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
 
     # Felles merknad om Glommadyppen-regelen
     details.append(
-        "Glommadyppen krever våtdrakt uansett temperatur av sikkerhetsmessige grunner. "
+        "🧥 Glommadyppen krever våtdrakt uansett temperatur av sikkerhetsmessige grunner. "
         "Unntak kan søkes arrangøren individuelt."
     )
 
@@ -995,6 +995,25 @@ def page_informasjon():
         "meteorologisk tjeneste."
     )
 
+    # ── Kart over målestasjoner ───────────────────────────────────────────────
+    import os
+    kart_fil = "kart_malestasjoner.png"
+    if os.path.exists(kart_fil):
+        st.subheader("Kart over målestasjoner og strekninger")
+        st.image(
+            kart_fil,
+            caption=(
+                "Oversikt over NVE-målestasjoner langs Vorma og Glomma med GPS-koordinater "
+                "og elveavstander fra Minnesund. Kilde: Anton Vooren / Fet Svømmeklubb."
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "Kart over målestasjoner vises her når filen `kart_malestasjoner.png` "
+            "er lastet opp til repoet."
+        )
+
     st.subheader("Prediksjonsmodell")
     st.markdown("""
     Modellen beregner forventet vanntemperatur langs svømmestrekningene:
@@ -1035,7 +1054,7 @@ def page_informasjon():
 
     st.divider()
 
-    st.subheader("Våtdrakt og sikkerhet – Glommadyppen")
+    st.subheader("🧥 Våtdrakt og sikkerhet – Glommadyppen")
     st.info(
         "**Glommadyppen-regel:** Våtdrakt er obligatorisk for alle deltakere, "
         "uavhengig av vanntemperatur. Dette er en sikkerhetsmessig beslutning fra "
@@ -1532,7 +1551,7 @@ def main():
         - Validert 2018–2025 (AUC = 0,87)
 
         **Glommadyppen – våtdrakt**
-        - Våtdrakt obligatorisk uansett temperatur
+        - 🧥 Obligatorisk uansett temperatur
         - Unntak: søk arrangøren
 
         **World Athletics OW-grenser**
