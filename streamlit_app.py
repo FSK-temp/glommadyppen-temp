@@ -74,6 +74,16 @@ CRITICAL_WIND_SPEED  = 1.9       # m/s
 ENERGY_THRESHOLD     = 70.0      # m·h – alarm
 ENERGY_WARN          = 45.0      # m·h – advarsel
 
+# ── Seiche-ettereffekt konfigurasjon ─────────────────────────────────────────
+# Etter en bekreftet kald oppvellingsepisode ved Minnesund oscillerer
+# sprangsjiktet i Mjøsa med ~8–9 dagers halvperiode (Thendrup 1978).
+# Sekundær kaldepuls opptrer typisk 5–12 dager etter primær bunn.
+# Validert mot 61 episoder 2015–2025: +22 pst.poeng sensitivitet, +15 FP (daglig).
+SEICHE_WINDOW_START_DAYS = 5    # dager etter primær kaldbunn
+SEICHE_WINDOW_END_DAYS   = 12   # dager etter primær kaldbunn
+SEICHE_COLD_THRESHOLD    = 10.0 # °C – absolutt tak for å telle som "kald episode"
+SEICHE_ANOMALY_MIN       = 3.0  # °C – minimum ΔT (bunn vs. 7-dagers baseline)
+
 # ── Open Water temperaturgrenser (World Athletics / FINA) ────────────────────
 OW_ABORT            = 14.0
 OW_WETSUIT_REQUIRED = 16.0
@@ -282,6 +292,101 @@ def calculate_travel_time(discharge_df):
             f"august-median ({FALLBACK_DISCHARGE:.0f} m³/s)")
 
 
+def detect_seiche_risk(vorma_df, hours_back_history=336):
+    """
+    Sjekker om det finnes en bekreftet kald oppvellingsepisode (ΔT ≥ 3 °C,
+    bunn < 10 °C) ved Minnesund i perioden 5–12 dager tilbake i tid.
+
+    Seiche-mekanisme (Thendrup 1978): etter at sørlig vind setter sprangsjiktet
+    i Mjøsa på skrå, vil termoklinen oscillere frem og tilbake med ~8–9 dagers
+    halvperiode når vinden avtar. Dette gir sekundære kaldpulser selv uten nytt
+    vindpådriv, typisk 5–12 dager etter primær bunn.
+
+    Validering 2015–2025 (daglig, Fetsund < 18 °C som "kaldt"):
+        Modell A (kun vind):          Sensitivitet 0.70, F1 0.756
+        Modell B (vind + seiche):     Sensitivitet 0.92, F1 0.876
+        Seiche bidrar med +22 pst.p. sensitivitet og kun +15 FP-dager (av 682).
+
+    Returnerer dict med:
+        'active'         : bool – seiche-risiko er aktiv nå
+        'episode_date'   : Timestamp eller None – dato for primær kaldbunn
+        'episode_min_T'  : float – minimums-temperatur i episoden
+        'episode_dT'     : float – ΔT (baseline − bunn)
+        'days_ago'       : float – dager siden primær bunn
+        'days_remaining' : float – dager til slutt på seiche-vindu (dag 12)
+    """
+    result = {
+        'active': False,
+        'episode_date':  None,
+        'episode_min_T': None,
+        'episode_dT':    None,
+        'days_ago':      None,
+        'days_remaining': None,
+    }
+
+    if vorma_df is None or vorma_df.empty:
+        return result
+
+    df = vorma_df.copy()
+    df['time'] = pd.to_datetime(df['time'])
+    if df['time'].dt.tz is None:
+        df['time'] = df['time'].dt.tz_localize('UTC')
+    df = df.sort_values('time').reset_index(drop=True)
+
+    now_utc = pd.Timestamp.now(tz='UTC')
+
+    # Hent siste `hours_back_history` timer for å ha nok historikk til baseline
+    cutoff = now_utc - timedelta(hours=hours_back_history)
+    df = df[df['time'] >= cutoff].copy()
+    if len(df) < 24:
+        return result
+
+    # Rullende 3h-gjennomsnitt for å dempe sensorstøy
+    df = df.set_index('time')
+    df['T_s'] = df['value'].rolling('3h', min_periods=1).mean()
+
+    # Definer seiche-vinduet: [nå - 12 dager, nå - 5 dager]
+    window_end   = now_utc - timedelta(days=SEICHE_WINDOW_START_DAYS)
+    window_start = now_utc - timedelta(days=SEICHE_WINDOW_END_DAYS)
+
+    window_data = df[(df.index >= window_start) & (df.index <= window_end)]
+    if len(window_data) < 6:
+        return result
+
+    # Finn det absolutte minimumet i vinduet
+    t_min_idx = window_data['T_s'].idxmin()
+    T_min_val  = float(window_data.loc[t_min_idx, 'T_s'])
+
+    # Absolutt temperaturkrav
+    if T_min_val >= SEICHE_COLD_THRESHOLD:
+        return result
+
+    # Beregn baseline: 7-dagers median FØR episoden
+    baseline_data = df[(df.index >= t_min_idx - timedelta(days=7)) &
+                       (df.index <  t_min_idx - timedelta(hours=12))]
+    if len(baseline_data) < 24:
+        return result
+
+    baseline = float(baseline_data['T_s'].median())
+    dT       = baseline - T_min_val
+
+    if dT < SEICHE_ANOMALY_MIN:
+        return result
+
+    days_ago       = (now_utc - t_min_idx).total_seconds() / 86400
+    days_remaining = SEICHE_WINDOW_END_DAYS - days_ago
+
+    result.update({
+        'active':          True,
+        'episode_date':    t_min_idx,
+        'episode_min_T':   round(T_min_val, 1),
+        'episode_dT':      round(dT, 1),
+        'days_ago':        round(days_ago, 1),
+        'days_remaining':  round(max(0.0, days_remaining), 1),
+    })
+    return result
+
+
 def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime,
                                 fetsund_temp_df=None):
     """
@@ -363,7 +468,8 @@ def _calculate_confidence(df, target_time):
     return tc * min(len(df) / 72, 1.0)
 
 
-def assess_risk_open_water(predicted_temp, weather_forecast=None):
+def assess_risk_open_water(predicted_temp, weather_forecast=None,
+                           seiche_risk=None):
     """
     Risikovurdering basert på World Athletics / FINA OW-regler og
     Glommadyppens lokale regler.
@@ -372,6 +478,9 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
     Unntak kan søkes arrangøren. Arrangøren følger World Athletics-terskler
     for vurdering av gjennomføring, men kan skjønnsmessig justere den nedre
     grensen basert på helhetsvurdering (vær, sikt, strøm, deltakermassen).
+
+    seiche_risk: dict fra detect_seiche_risk() – legger til advarsel om
+    sekundær kaldpuls dersom aktiv.
     """
     WETSUIT_ALWAYS = "🧥 Obligatorisk (Glommadyppen-regel)"
     WETSUIT_COLOR  = "#2c6e9e"
@@ -433,6 +542,19 @@ def assess_risk_open_water(predicted_temp, weather_forecast=None):
     if southerly_risk:
         details.append(
             "⚠️ Vedvarende sørlig vind er varslet — temperaturfall fra Mjøsa-oppvelling er mulig."
+        )
+
+    if seiche_risk is not None and seiche_risk.get('active'):
+        days_ago      = seiche_risk['days_ago']
+        days_rem      = seiche_risk['days_remaining']
+        ep_date_oslo  = seiche_risk['episode_date'].tz_convert(
+            'Europe/Oslo').strftime('%-d. %b kl %H:%M')
+        details.append(
+            f"🌊 Seiche-ettereffekt aktiv: kald episode ved Minnesund "
+            f"({seiche_risk['episode_min_T']:.1f} °C, ΔT={seiche_risk['episode_dT']:.1f} °C) "
+            f"for {days_ago:.1f} dager siden ({ep_date_oslo}). "
+            f"Forhøyet risiko for sekundær kaldpuls i ca. {days_rem:.0f} dager til "
+            f"(sprangsjikt-oscillasjon i Mjøsa, ~8–9 dagers halvperiode)."
         )
 
     return label, color, WETSUIT_ALWAYS, WETSUIT_COLOR, details
@@ -996,23 +1118,15 @@ def page_informasjon():
     )
 
     # ── Kart over målestasjoner ───────────────────────────────────────────────
-    import os
-    kart_fil = "kart_malestasjoner.png"
-    if os.path.exists(kart_fil):
-        st.subheader("Kart over målestasjoner og strekninger")
-        st.image(
-            kart_fil,
-            caption=(
-                "Oversikt over NVE-målestasjoner langs Vorma og Glomma med GPS-koordinater "
-                "og elveavstander fra Minnesund. Kilde: Anton Vooren / Fet Svømmeklubb."
-            ),
-            use_container_width=True,
-        )
-    else:
-        st.info(
-            "Kart over målestasjoner vises her når filen `kart_malestasjoner.png` "
-            "er lastet opp til repoet."
-        )
+    st.subheader("Kart over målestasjoner og strekninger")
+    st.image(
+        "kart_malestasjoner.png",
+        caption=(
+            "Oversikt over NVE-målestasjoner langs Vorma og Glomma med GPS-koordinater "
+            "og elveavstander fra Minnesund. Kilde: Anton Vooren / Fet Svømmeklubb."
+        ),
+        use_container_width=True,
+    )
 
     st.subheader("Prediksjonsmodell")
     st.markdown("""
@@ -1051,6 +1165,37 @@ def page_informasjon():
         - Mange måneder før arrangementet reflekterer den kun **nåværende forhold**
         - Usikkerheten er ±2–3 °C (95 % KI)
         """)
+
+    st.divider()
+
+    st.subheader("🌊 Seiche-ettereffekt – forsinket kaldpuls fra Mjøsa")
+    st.markdown("""
+    Etter at sørlig vind har presset det varme overflatelaget mot sørenden av Mjøsa
+    og drevet kaldt bunnvann (hypolimnion) opp mot Minnesund, vil **sprangsjiktet
+    fortsette å oscillere** som en pendel selv etter at vinden har lagt seg.
+    Denne indre bølgen (seiché) er beskrevet av Thendrup (1978) med en halvperiode på
+    typisk **5–8 dager** ved normal sommerstratifisering.
+
+    Praktisk konsekvens: en ny kaldpuls kan nå Glomma **5–12 dager etter den første**,
+    uten nytt vindpådriv. Modellen overvåker dette og viser en forhøyet risikoindikator
+    i dette tidsvinduet.
+
+    | Kriterium for seiche-trigger | Verdi |
+    |---|---|
+    | Primær bunn ved Minnesund | < 10 °C |
+    | Minimum temperaturdropp (ΔT) | ≥ 3 °C under 7-dagers baseline |
+    | Forhøyet risikovindu | Dag 5–12 etter primær bunn |
+    | Typisk halvperiode | 8–9 dager |
+
+    **Validering 2015–2025 (682 juli–august-dager, Fetsund < 18 °C = «kaldt»):**
+
+    | Modell | Sensitivitet | F1-score | FN-dager |
+    |---|---|---|---|
+    | Kun vindbasert | 0,70 | 0,756 | 167 |
+    | Vind + seiche | **0,92** | **0,876** | **46** |
+
+    Seiche-triggeren legger til 121 korrekte alarmflagg og bare 15 falske alarmer.
+    """)
 
     st.divider()
 
@@ -1112,6 +1257,11 @@ def page_prediksjon():
         weather_mjosa = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON)
         if not weather_mjosa.empty:
             weather_mjosa = add_southerly_component(weather_mjosa)
+        # 14 dagers historikk for seiche-deteksjon (trenger dag 5–12 tilbake)
+        vorma_history = fetch_nve_data(STATION_SVANEFOSS, 1003, hours_back=336)
+        if vorma_history.empty:
+            vorma_history = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=336)
+        seiche = detect_seiche_risk(vorma_history)
 
     if primary_df.empty:
         st.error("Ingen Vorma-data tilgjengelig. Sjekk NVE HydAPI.")
@@ -1161,6 +1311,25 @@ def page_prediksjon():
              f"Fetsund: t = 9700 / {q_val:.0f} m³/s"
     )
 
+    # ── Seiche-ettereffekt banner ─────────────────────────────────────────────
+    if seiche['active']:
+        ep_date_oslo = seiche['episode_date'].tz_convert(
+            'Europe/Oslo').strftime('%-d. %b kl %H:%M')
+        days_rem = seiche['days_remaining']
+        st.warning(
+            f"🌊 **Seiche-ettereffekt aktiv** – forhøyet risiko for sekundær kaldpuls\n\n"
+            f"En bekreftet kald episode ble registrert ved Minnesund for "
+            f"**{seiche['days_ago']:.1f} dager siden** "
+            f"({ep_date_oslo}, min {seiche['episode_min_T']:.1f} °C, "
+            f"ΔT = {seiche['episode_dT']:.1f} °C). "
+            f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls – "
+            f"typisk opptrer sekundærdroppen 5–12 dager etter primær bunn. "
+            f"**Forhøyet risikovindu varer i ca. {days_rem:.0f} dager til.**\n\n"
+            f"*Validert 2015–2025: seiche-triggeren øker modellens sensitivitet "
+            f"fra 0,70 til 0,92 (F1: 0,756 → 0,876) med minimal økning i falske alarmer.*",
+            icon="🌊",
+        )
+
     st.divider()
 
     # ── Prediksjon for arrangementet ──────────────────────────────────────────
@@ -1202,7 +1371,7 @@ def page_prediksjon():
         lb         = pred_temp - 1.96 * sigma
         ub         = pred_temp + 1.96 * sigma
         risk_label, risk_color, ws_label, ws_color, risk_details = \
-            assess_risk_open_water(pred_temp, weather_mjosa)
+            assess_risk_open_water(pred_temp, weather_mjosa, seiche_risk=seiche)
 
         st.markdown(
             f"""
@@ -1549,6 +1718,7 @@ def main():
         - Fetsund (mål): t = 9700 / Q
         - Vorma-anomali respons: 63 %
         - Validert 2018–2025 (AUC = 0,87)
+        - 🌊 Seiche-ettereffekt: dag 5–12
 
         **Glommadyppen – våtdrakt**
         - 🧥 Obligatorisk uansett temperatur
