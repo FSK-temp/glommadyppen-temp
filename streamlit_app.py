@@ -64,6 +64,10 @@ FALLBACK_DISCHARGE      = 437.0  # August-median Ertesekken (m³/s)
 
 TEMPERATURE_SURVIVAL = 0.63      # Empirisk fortynningskoeffisient Svanefoss→Fetsund
 MODEL_SIGMA          = 2.0       # °C – prediksjonsstandardavvik ved transporttidshorisonten
+# Empiriske grenser fra Fetsund-historikk (2015–2025, juli dag 15 – august)
+# Brukes til å klippe KI-båndene slik at de ikke overskrider fysisk mulig range.
+TEMP_HIST_LOWER      = 10.0      # °C – P1 av historiske august-temperaturer ved Fetsund
+TEMP_HIST_UPPER      = 24.0      # °C – historisk maksimum (aldri over 23,8 °C målt)
 
 # ── Vindenergi-konfigurasjon ──────────────────────────────────────────────────
 WIND_SECTOR_MIN      = 135
@@ -1013,10 +1017,10 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
         rows.append({
             'time':      t_fut,
             'predicted': round(pred,               2),
-            'lower_68':  round(pred - sigma,        2),
-            'upper_68':  round(pred + sigma,        2),
-            'lower_95':  round(pred - 1.96 * sigma, 2),
-            'upper_95':  round(pred + 1.96 * sigma, 2),
+            'lower_68':  round(max(pred - sigma,        TEMP_HIST_LOWER), 2),
+            'upper_68':  round(min(pred + sigma,        TEMP_HIST_UPPER), 2),
+            'lower_95':  round(max(pred - 1.96 * sigma, TEMP_HIST_LOWER), 2),
+            'upper_95':  round(min(pred + 1.96 * sigma, TEMP_HIST_UPPER), 2),
         })
 
     return pd.DataFrame(rows)
@@ -1368,8 +1372,8 @@ def page_prediksjon():
     elif prediction:
         pred_temp  = prediction['predicted_temp']
         sigma      = 2.0
-        lb         = pred_temp - 1.96 * sigma
-        ub         = pred_temp + 1.96 * sigma
+        lb         = max(pred_temp - 1.96 * sigma, TEMP_HIST_LOWER)
+        ub         = min(pred_temp + 1.96 * sigma, TEMP_HIST_UPPER)
         risk_label, risk_color, ws_label, ws_color, risk_details = \
             assess_risk_open_water(pred_temp, weather_mjosa, seiche_risk=seiche)
 
