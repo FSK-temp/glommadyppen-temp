@@ -1049,22 +1049,27 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
                       annotation_font_size=10, annotation_font_color="rgba(110,110,110,0.65)")
 
     if forecast_df is not None and not forecast_df.empty:
-        t_fwd = list(forecast_df['time'])
-        t_rev = list(forecast_df['time'])[::-1]
-        fig.add_trace(go.Scatter(
-            x=t_fwd + t_rev,
-            y=list(forecast_df['upper_95']) + list(forecast_df['lower_95'])[::-1],
-            fill='toself', fillcolor='rgba(56,141,228,0.10)',
-            line=dict(color='rgba(0,0,0,0)', width=0),
-            name='95 % KI', hoverinfo='skip',
-        ))
-        fig.add_trace(go.Scatter(
-            x=t_fwd + t_rev,
-            y=list(forecast_df['upper_68']) + list(forecast_df['lower_68'])[::-1],
-            fill='toself', fillcolor='rgba(56,141,228,0.22)',
-            line=dict(color='rgba(0,0,0,0)', width=0),
-            name='68 % KI', hoverinfo='skip',
-        ))
+        # Filtrer ut rader der KI-båndet har nullbredde (sigma=0 ved t=0),
+        # ellers tegner Plotly fill='toself'-polygoner som usynlige linjer.
+        band_df = forecast_df[forecast_df['upper_95'] > forecast_df['lower_95']].copy()
+        t_fwd = list(band_df['time'])
+        t_rev = list(band_df['time'])[::-1]
+        if t_fwd:
+            fig.add_trace(go.Scatter(
+                x=t_fwd + t_rev,
+                y=list(band_df['upper_95']) + list(band_df['lower_95'])[::-1],
+                fill='toself', fillcolor='rgba(56,141,228,0.10)',
+                line=dict(color='rgba(0,0,0,0)', width=0),
+                name='95 % KI', hoverinfo='skip',
+            ))
+        if t_fwd:
+            fig.add_trace(go.Scatter(
+                x=t_fwd + t_rev,
+                y=list(band_df['upper_68']) + list(band_df['lower_68'])[::-1],
+                fill='toself', fillcolor='rgba(56,141,228,0.22)',
+                line=dict(color='rgba(0,0,0,0)', width=0),
+                name='68 % KI', hoverinfo='skip',
+            ))
         fig.add_trace(go.Scatter(
             x=forecast_df['time'], y=forecast_df['predicted'],
             mode='lines', name='Prediksjon',
