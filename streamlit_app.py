@@ -1455,8 +1455,8 @@ def page_prediksjon():
         st.plotly_chart(fig_fc, use_container_width=True)
         st.caption(
             "Solid linje: Observert (Fetsund) · Stiplet linje: prediksjon. "
-            "Prediksjonen gjelder startpunktet for **Fløter'n** (35,5 km fra Svanefoss) "
-            "og **Fetsund** (mål, 45 km) — temperaturen er i praksis lik ved begge punkter. "
+            "Prediksjonen gjelder startpunktet og sluttpunktet for Glommadyppen (**Fløter'n**) "
+            " — temperaturen er i praksis lik ved begge punkter med en forsinkelse på 4-5t. "
             f"Datahorisonten (+{travel_h_now:.0f} t) markerer der Vorma-observasjoner gir "
             "direkte grunnlag (σ ≈ 2 °C). Etter dette ekstrapoleres Vorma-anomalien "
             "eksponentielt og usikkerheten vokser tilsvarende."
