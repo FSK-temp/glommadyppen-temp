@@ -1100,7 +1100,7 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
 
     fig.update_layout(
         title=title, xaxis_title='',
-        yaxis=dict(title='°C', range=[10, 28], fixedrange=True),
+        yaxis=dict(title='°C', range=[8, 25], fixedrange=True),
         height=430, hovermode='x unified', template='plotly_white',
         margin=dict(l=50, r=90, t=50, b=40),
         legend=dict(orientation='h', yanchor='bottom', y=1.02,
