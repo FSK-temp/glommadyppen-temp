@@ -1142,8 +1142,8 @@ def page_informasjon():
     *Vorma_anomali* er gjeldende Vorma-temperatur minus Vormas 48-timers median,
     og koeffisienten 0,63 er empirisk validert mot 35+ kalde episoder fra 2018–2025.
 
-    Prediksjonen gjelder **Fløter'n** (startpunkt Glommadyppen, 35,5 km fra Svanefoss)
-    og **Fetsund** (mål, 45 km). Temperaturen er i praksis lik ved begge punkter —
+    Prediksjonen gjelder startpunktet til **Fløter'n** (Glommadyppen), 35,5 km fra Svanefoss
+    og slutpunktet 11 km nedstrøms i Glomma. Temperaturen er i praksis lik ved begge punkter —
     forskjellen er *når* det kalde vannet ankommer:
 
     | Punkt | Avstand fra Svanefoss | Transporttid |
@@ -1172,7 +1172,7 @@ def page_informasjon():
 
     st.divider()
 
-    st.subheader("🌊 Seiche-ettereffekt – forsinket kaldpuls fra Mjøsa")
+    st.subheader("Ettereffekt – forsinket kaldpuls fra Mjøsa")
     st.markdown("""
     Etter at sørlig vind har presset det varme overflatelaget mot sørenden av Mjøsa
     og drevet kaldt bunnvann (hypolimnion) opp mot Minnesund, vil **sprangsjiktet
@@ -1184,7 +1184,7 @@ def page_informasjon():
     uten nytt vindpådriv. Modellen overvåker dette og viser en forhøyet risikoindikator
     i dette tidsvinduet.
 
-    | Kriterium for seiche-trigger | Verdi |
+    | Kriterium for ettereffekt | Verdi |
     |---|---|
     | Primær bunn ved Minnesund | < 10 °C |
     | Minimum temperaturdropp (ΔT) | ≥ 3 °C under 7-dagers baseline |
@@ -1196,14 +1196,14 @@ def page_informasjon():
     | Modell | Sensitivitet | F1-score | FN-dager |
     |---|---|---|---|
     | Kun vindbasert | 0,70 | 0,756 | 167 |
-    | Vind + seiche | **0,92** | **0,876** | **46** |
+    | Vind + ettereffekt | **0,92** | **0,876** | **46** |
 
-    Seiche-triggeren legger til 121 korrekte alarmflagg og bare 15 falske alarmer.
+    Ettereffekt triggeren legger til 121 korrekte alarmflagg og bare 15 falske alarmer.
     """)
 
     st.divider()
 
-    st.subheader("🧥 Våtdrakt og sikkerhet – Glommadyppen")
+    st.subheader("Våtdrakt og sikkerhet – Glommadyppen")
     st.info(
         "**Glommadyppen-regel:** Våtdrakt er obligatorisk for alle deltakere, "
         "uavhengig av vanntemperatur. Dette er en sikkerhetsmessig beslutning fra "
@@ -1236,10 +1236,10 @@ def page_informasjon():
 def page_prediksjon():
     st.title("Temperaturprediksjon – Fløter'n / Fetsund")
     st.markdown(
-        "Predikert vanntemperatur langs svømmestrekningen basert på observasjoner i Mjøsa, "
-        "Vorma og Glomma. Primært prediksjonspunkt er **Fløter'n** (startpunkt Glommadyppen, "
-        "35,5 km fra Svanefoss, t = 7670/Q). Fetsund bru (45 km, t = 9700/Q) er sekundært "
-        "målepunkt. Det kalde vannet ankommer Fløter'n **4–5 timer tidligere** enn Fetsund "
+        "Predikert vanntemperatur langs den lengste svømmestrekningen i Glommadyppen basert på observasjoner i Mjøsa, "
+        "Vorma og Glomma. Primært prediksjonspunkt er startpunktet til **Fløter'n** (Glommadyppen), "
+        "35,5 km fra Svanefoss. Fetsund bru 10,5 km lengre nedstrøms Glomma er sekundært "
+        "målepunkt. Det kalde vannet ankommer startpunktet til Fløter'n **4–5 timer tidligere** enn ved sluttpunktet"
         "ved typisk augustvannføring."
     )
 
@@ -1321,16 +1321,14 @@ def page_prediksjon():
             'Europe/Oslo').strftime('%-d. %b kl %H:%M')
         days_rem = seiche['days_remaining']
         st.warning(
-            f"🌊 **Seiche-ettereffekt aktiv** – forhøyet risiko for sekundær kaldpuls\n\n"
+            f"**Seiche-ettereffekt aktiv** – forhøyet risiko for sekundær kaldpuls\n\n"
             f"En bekreftet kald episode ble registrert ved Minnesund for "
             f"**{seiche['days_ago']:.1f} dager siden** "
             f"({ep_date_oslo}, min {seiche['episode_min_T']:.1f} °C, "
             f"ΔT = {seiche['episode_dT']:.1f} °C). "
             f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls – "
             f"typisk opptrer sekundærdroppen 5–12 dager etter primær bunn. "
-            f"**Forhøyet risikovindu varer i ca. {days_rem:.0f} dager til.**\n\n"
-            f"*Validert 2015–2025: seiche-triggeren øker modellens sensitivitet "
-            f"fra 0,70 til 0,92 (F1: 0,756 → 0,876) med minimal økning i falske alarmer.*",
+            f"**Forhøyet risikovindu varer i ca. {days_rem:.0f} dager til.**\n\n",
             icon="🌊",
         )
 
@@ -1451,8 +1449,8 @@ def page_prediksjon():
         fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now)
         st.plotly_chart(fig_fc, use_container_width=True)
         st.caption(
-            "Solid linje: observert (Fetsund) · Stiplet linje: prediksjon. "
-            "Prediksjonen gjelder **Fløter'n** (start, 35,5 km fra Svanefoss) "
+            "Solid linje: Observert (Fetsund) · Stiplet linje: prediksjon. "
+            "Prediksjonen gjelder startpunktet for **Fløter'n** (35,5 km fra Svanefoss) "
             "og **Fetsund** (mål, 45 km) — temperaturen er i praksis lik ved begge punkter. "
             f"Datahorisonten (+{travel_h_now:.0f} t) markerer der Vorma-observasjoner gir "
             "direkte grunnlag (σ ≈ 2 °C). Etter dette ekstrapoleres Vorma-anomalien "
@@ -1527,7 +1525,7 @@ def page_data_varsel():
     st.title("Observasjoner og Værvarsler")
     st.markdown(
         "Faktiske målinger fra NVE og met.no. "
-        "Bruk denne siden for å se rå data og standard værvarsler."
+        "Bruk denne siden for å se rådata og standard værvarsler."
     )
 
     tabs = st.tabs([
@@ -1722,11 +1720,11 @@ def main():
         - Fetsund (mål): t = 9700 / Q
         - Vorma-anomali respons: 63 %
         - Validert 2018–2025 (AUC = 0,87)
-        - 🌊 Seiche-ettereffekt: dag 5–12
+        - Ettereffekt: dag 5–12 etter vindepisode
 
         **Glommadyppen – våtdrakt**
-        - 🧥 Obligatorisk uansett temperatur
-        - Unntak: søk arrangøren
+        - Våtdrakt er obligatorisk uansett temperatur
+        - For unntak: Søk arrangøren
 
         **World Athletics OW-grenser**
         - < 14 °C: avlysning anbefalt
