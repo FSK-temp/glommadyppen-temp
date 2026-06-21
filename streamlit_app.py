@@ -78,6 +78,21 @@ CRITICAL_WIND_SPEED  = 1.9       # m/s
 ENERGY_THRESHOLD     = 70.0      # m·h – alarm
 ENERGY_WARN          = 45.0      # m·h – advarsel
 
+# ── Vindrisiko-justering av temperaturprognosen ───────────────────────────────
+# Basert på empirisk regresjon: kumulativ vindenergi (E, 48t/24t-lag) mot
+# Fetsund-anomali (min over [+24t,+96t], 7-dagers baseline for å unngå
+# baseline-kontaminering). r ≈ -0.29, R² ≈ 0.08 (n=5004, jul-aug 2015-2025).
+# Sammenhengen er for svak til å flytte selve sentralestimatet (derfor brukes
+# terskel-klassifikatoren over til det formålet) - men den brukes her til å
+# SKJEVE usikkerhetsbåndet nedover og utvide det når værvarselet tilsier økt
+# oppvellingsrisiko innenfor den horisonten Met.no-vindvarselet faktisk er
+# pålitelig (jf. AUC=0.87 ved 1-3 døgn vs. 0.57 ved 7 døgn).
+WIND_RISK_HORIZON_HOURS = 96      # t – utover dette anses vindvarselet for upålitelig
+WIND_ANOMALY_SLOPE      = -0.015  # °C per m·h (svak, empirisk - se analysenotat)
+WIND_ANOMALY_E_TYPISK   = 32.0    # m·h – median E i datasettet, brukt som nullpunkt
+WIND_SIGMA_MULT_WARN    = 1.4     # KI-bredde-multiplikator når E > advarselsterskel
+WIND_SIGMA_MULT_ALARM   = 1.8     # KI-bredde-multiplikator når E > alarmterskel
+
 # ── Seiche-ettereffekt konfigurasjon ─────────────────────────────────────────
 # Etter en bekreftet kald oppvellingsepisode ved Minnesund oscillerer
 # sprangsjiktet i Mjøsa med ~8–9 dagers halvperiode (Thendrup 1978).
@@ -950,13 +965,19 @@ def _wind_energy_chart(energy_df,
 # ============================================================================
 
 def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
-                           hours_ahead=120, step_h=3):
+                           hours_ahead=120, step_h=3, energy_df=None):
     """
     Beregner tidsserie for predikert temperatur ved Fløter'n / Fetsund
     med usikkerhetsintervaller.
 
     Modell: T_pred(t) = fetsund_baseline + vorma_anomaly(t - travel_h) × κ
     Usikkerhet vokser lineært til travel_h, deretter som √(1 + (h-travel_h)/24).
+
+    Hvis energy_df (fra build_wind_energy_series) sendes inn, justeres KI-båndet
+    innenfor WIND_RISK_HORIZON_HOURS basert på forventet SE/S-vindenergi:
+    sentralestimatet ('predicted') røres IKKE, siden vind-magnitude-sammenhengen
+    er for svak (R² ≈ 0.08) til å brukes som punktestimat - se WIND_ANOMALY_SLOPE.
+    I stedet utvides/skjeves nedre KI-grense for å reflektere økt nedsiderisiko.
     """
     if vorma_df is None or vorma_df.empty:
         return pd.DataFrame()
@@ -989,6 +1010,15 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
         vorma_df['time'] >= vorma_df['time'].max() - timedelta(hours=48)
     ]['value'].mean()
 
+    # ── Forbered vindenergi-prognose for oppslag (E mot tid) ───────────────────
+    energy_lookup = None
+    if energy_df is not None and not energy_df.empty:
+        energy_lookup = energy_df[['time', 'E', 'is_forecast']].dropna(subset=['time']).copy()
+        energy_lookup['time'] = pd.to_datetime(energy_lookup['time'])
+        if energy_lookup['time'].dt.tz is None:
+            energy_lookup['time'] = energy_lookup['time'].dt.tz_localize('UTC')
+        energy_lookup = energy_lookup.sort_values('time').reset_index(drop=True)
+
     now_utc = pd.Timestamp.now(tz='UTC')
     rows = []
 
@@ -1014,13 +1044,39 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
         extrap = max(0.0, h_elapsed - travel_h)
         sigma  = MODEL_SIGMA * ramp * np.sqrt(1.0 + extrap / 24.0)
 
+        # ── Vindrisiko-justering (kun innenfor pålitelig prognosehorisont) ─────
+        e_fc        = None
+        risk_level  = None
+        sigma_mult  = 1.0
+        risk_shift  = 0.0
+        if energy_lookup is not None and h_elapsed <= WIND_RISK_HORIZON_HOURS:
+            nearest = energy_lookup.iloc[
+                (energy_lookup['time'] - t_fut).abs().argsort()[:1]
+            ]
+            if not nearest.empty and abs(
+                (nearest.iloc[0]['time'] - t_fut).total_seconds()
+            ) <= 5400:  # 90 min toleranse for matching
+                e_fc = float(nearest.iloc[0]['E'])
+                if e_fc >= ENERGY_THRESHOLD:
+                    sigma_mult, risk_level = WIND_SIGMA_MULT_ALARM, 'alarm'
+                elif e_fc >= ENERGY_WARN:
+                    sigma_mult, risk_level = WIND_SIGMA_MULT_WARN, 'advarsel'
+                else:
+                    risk_level = 'lav'
+                # Kun nedsiderisiko - vind gir aldri grunnlag for å anta varmere.
+                risk_shift = min(0.0, WIND_ANOMALY_SLOPE * (e_fc - WIND_ANOMALY_E_TYPISK))
+
+        sigma_eff = sigma * sigma_mult
+
         rows.append({
-            'time':      t_fut,
-            'predicted': round(pred,               2),
-            'lower_68':  round(max(pred - sigma,        TEMP_HIST_LOWER), 2),
-            'upper_68':  round(min(pred + sigma,        TEMP_HIST_UPPER), 2),
-            'lower_95':  round(max(pred - 1.96 * sigma, TEMP_HIST_LOWER), 2),
-            'upper_95':  round(min(pred + 1.96 * sigma, TEMP_HIST_UPPER), 2),
+            'time':            t_fut,
+            'predicted':       round(pred, 2),
+            'lower_68':        round(max(pred + risk_shift - sigma_eff,        TEMP_HIST_LOWER), 2),
+            'upper_68':        round(min(pred + sigma_eff,                     TEMP_HIST_UPPER), 2),
+            'lower_95':        round(max(pred + risk_shift - 1.96 * sigma_eff, TEMP_HIST_LOWER), 2),
+            'upper_95':        round(min(pred + 1.96 * sigma_eff,              TEMP_HIST_UPPER), 2),
+            'wind_E_forecast': round(e_fc, 1) if e_fc is not None else None,
+            'wind_risk_level': risk_level,
         })
 
     return pd.DataFrame(rows)
@@ -1049,6 +1105,12 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
                       annotation_font_size=10, annotation_font_color="rgba(110,110,110,0.65)")
 
     if forecast_df is not None and not forecast_df.empty:
+        forecast_df = forecast_df.copy()
+        if 'wind_E_forecast' in forecast_df.columns:
+            forecast_df['wind_E_forecast'] = forecast_df['wind_E_forecast'].apply(
+                lambda v: f"{v:.1f} m·h" if pd.notna(v) else "ingen prognose")
+            forecast_df['wind_risk_level'] = forecast_df['wind_risk_level'].fillna('–')
+
         # Filtrer ut rader der KI-båndet har nullbredde (sigma=0 ved t=0),
         # ellers tegner Plotly fill='toself'-polygoner som usynlige linjer.
         band_df = forecast_df[forecast_df['upper_95'] > forecast_df['lower_95']].copy()
@@ -1070,19 +1132,37 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
                 line=dict(color='rgba(0,0,0,0)', width=0),
                 name='68 % KI', hoverinfo='skip',
             ))
+        hover_cols = ['lower_68', 'upper_68', 'lower_95', 'upper_95']
+        hover_template = (
+            '<b>Prediksjon</b>: %{y:.1f} °C<br>'
+            '68 % KI: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
+            '95 % KI: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
+        )
+        if 'wind_E_forecast' in forecast_df.columns:
+            hover_cols += ['wind_E_forecast', 'wind_risk_level']
+            hover_template += (
+                '<br>Vindenergi (varsel): %{customdata[4]} (%{customdata[5]})'
+            )
+        hover_template += '<extra></extra>'
+
         fig.add_trace(go.Scatter(
             x=forecast_df['time'], y=forecast_df['predicted'],
             mode='lines', name='Prediksjon',
             line=dict(color='#185FA5', width=2, dash='dash'),
-            customdata=forecast_df[['lower_68', 'upper_68',
-                                    'lower_95', 'upper_95']].values,
-            hovertemplate=(
-                '<b>Prediksjon</b>: %{y:.1f} °C<br>'
-                '68 % KI: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
-                '95 % KI: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
-                '<extra></extra>'
-            ),
+            customdata=forecast_df[hover_cols].values,
+            hovertemplate=hover_template,
         ))
+
+        if 'wind_risk_level' in forecast_df.columns:
+            risk_end = forecast_df[forecast_df['wind_risk_level'].notna()]
+            if not risk_end.empty:
+                risk_horizon_ms = risk_end['time'].max().timestamp() * 1000
+                fig.add_vline(
+                    x=risk_horizon_ms, line_dash='dot',
+                    line_color='rgba(186,117,23,0.45)', line_width=1,
+                    annotation_text='Vindrisiko-horisont', annotation_position='bottom right',
+                    annotation_font_size=10, annotation_font_color='rgba(186,117,23,0.75)',
+                )
 
         now_ms     = pd.Timestamp.now(tz='UTC').timestamp() * 1000
         horizon_ms = (pd.Timestamp.now(tz='UTC') +
@@ -1447,7 +1527,9 @@ def page_prediksjon():
     # ── Temperaturprognose ────────────────────────────────────────────────────
     st.subheader("Temperaturprognose – Fløter'n / Fetsund")
 
-    forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q)
+    energy_df   = build_wind_energy_series(frost_vind, weather_mjosa)
+    forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q,
+                                         energy_df=energy_df)
     t_flotern_h, travel_h_now, _, _ = calculate_travel_time(ertesekken_q)
 
     if not forecast_df.empty:
@@ -1459,7 +1541,13 @@ def page_prediksjon():
             " — temperaturen er i praksis lik ved begge punkter med en forsinkelse på 4-5t. "
             f"Datahorisonten (+{travel_h_now:.0f} t) markerer der Vorma-observasjoner gir "
             "direkte grunnlag (σ ≈ 2 °C). Etter dette ekstrapoleres Vorma-anomalien "
-            "eksponentielt og usikkerheten vokser tilsvarende."
+            "eksponentielt og usikkerheten vokser tilsvarende. "
+            f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS:.0f} t, der "
+            "Met.no-vindvarselet fortsatt er pålitelig) utvides og skjeves usikkerhetsbåndet "
+            "nedover når prognosert vindenergi nærmer seg advarsel-/alarmterskel – "
+            "selve prediksjonslinjen er **ikke** justert, siden sammenhengen mellom "
+            "vindenergi og temperaturfallets størrelse er for usikker (R² ≈ 0,08) til å "
+            "brukes som punktestimat."
         )
     else:
         st.warning("Ikke nok data for prognosevisning.")
@@ -1468,8 +1556,6 @@ def page_prediksjon():
     if not weather_mjosa.empty or not frost_vind.empty:
         st.divider()
         st.subheader("Vind og oppvellingsrisiko – Mjøsa")
-
-        energy_df = build_wind_energy_series(frost_vind, weather_mjosa)
 
         c1, c2, c3, c4 = st.columns(4)
         if not energy_df.empty:
