@@ -1,0 +1,30 @@
+name: Logg prediksjon
+
+# Kjører daglig kl. 06:00 UTC (~08:00 Oslo-tid). Scriptet hopper stillegående
+# over loggingen utenfor sesong (når Svanefoss-stasjonen ikke har data), så
+# det er trygt å la denne stå året rundt fremfor å vedlikeholde datoer her.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}   # tillater manuell kjøring fra Actions-fanen for testing
+
+jobs:
+  log-prediction:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sjekk ut repo
+        uses: actions/checkout@v4
+
+      - name: Sett opp Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer avhengigheter
+        run: pip install pandas numpy requests gspread google-auth
+
+      - name: Kjør prediksjonslogger
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          NVE_API_KEY: ${{ secrets.NVE_API_KEY }}
+        run: python log_prediction.py
