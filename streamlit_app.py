@@ -63,7 +63,10 @@ TRANSPORT_COEFF_FLOTERN = 7670   # Svanefoss → Fløter'n  (35,5 km) – avlede
 FALLBACK_DISCHARGE      = 437.0  # August-median Ertesekken (m³/s)
 
 TEMPERATURE_SURVIVAL = 0.63      # Empirisk fortynningskoeffisient Svanefoss→Fetsund
-MODEL_SIGMA          = 2.0       # °C – prediksjonsstandardavvik ved transporttidshorisonten
+MODEL_SIGMA          = 2.0       # °C – prediksjonsstandardavvik når vi går inn i ren ekstrapolering
+MODEL_SIGMA_DATA     = 0.6       # °C – residual innenfor datahorisonten (ekte Vorma-obs), ~1.25×validert MAE
+                                  # (0.50-0.58 °C). Foreløpig estimat - bør valideres mot faktiske
+                                  # prediksjonsresidualer når historisk prediksjonslogg finnes.
 # Empiriske grenser fra Fetsund-historikk (2015–2025, juli dag 15 – august)
 # Brukes til å klippe KI-båndene slik at de ikke overskrider fysisk mulig range.
 TEMP_HIST_LOWER      = 10.0      # °C – P1 av historiske august-temperaturer ved Fetsund
@@ -971,7 +974,10 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
     med usikkerhetsintervaller.
 
     Modell: T_pred(t) = fetsund_baseline + vorma_anomaly(t - travel_h) × κ
-    Usikkerhet vokser lineært til travel_h, deretter som √(1 + (h-travel_h)/24).
+    Usikkerhet: lav og tilnærmet flat innenfor datahorisonten (travel_h, ekte
+    Vorma-observasjoner - kun κ/transporttid-residual, MODEL_SIGMA_DATA), vokser
+    deretter med √(ekstrapoleringstid) mot MODEL_SIGMA og videre etter hvert som
+    vi går utover datahorisonten uten ny data.
 
     Hvis energy_df (fra build_wind_energy_series) sendes inn, justeres KI-båndet
     innenfor WIND_RISK_HORIZON_HOURS basert på forventet SE/S-vindenergi:
@@ -1042,7 +1048,15 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
 
         ramp   = min(1.0, h_elapsed / travel_h)
         extrap = max(0.0, h_elapsed - travel_h)
-        sigma  = MODEL_SIGMA * ramp * np.sqrt(1.0 + extrap / 24.0)
+        # To regimer: (1) innenfor datahorisonten kjenner vi den faktiske
+        # Vorma-temperaturen på vei nedover elva - usikkerheten er kun
+        # κ/transporttid-modellens residual (MODEL_SIGMA_DATA), og vokser svakt
+        # fra ~0 (h=0, ren rapportering av nå-tilstand) til MODEL_SIGMA_DATA
+        # (h=travel_h). (2) Utover dette er det ren ekstrapolering uten ny data,
+        # og usikkerheten vokser videre mot/forbi MODEL_SIGMA - her dominerer
+        # værprognosen, og det er her vindrisiko-justeringen under slår inn.
+        sigma  = (MODEL_SIGMA_DATA * ramp
+                  + (MODEL_SIGMA - MODEL_SIGMA_DATA) * np.sqrt(extrap / 24.0))
 
         # ── Vindrisiko-justering (kun innenfor pålitelig prognosehorisont) ─────
         e_fc        = None
@@ -1540,8 +1554,10 @@ def page_prediksjon():
             "Prediksjonen gjelder startpunktet og sluttpunktet for Glommadyppen (**Fløter'n**) "
             " — temperaturen er i praksis lik ved begge punkter med en forsinkelse på 4-5t. "
             f"Datahorisonten (+{travel_h_now:.0f} t) markerer der Vorma-observasjoner gir "
-            "direkte grunnlag (σ ≈ 2 °C). Etter dette ekstrapoleres Vorma-anomalien "
-            "eksponentielt og usikkerheten vokser tilsvarende. "
+            "direkte grunnlag (σ vokser svakt fra 0 til ≈0,6 °C – kun κ/transporttid-residual, "
+            "siden vi her faktisk kjenner vannet som er på vei). Etter dette ekstrapoleres "
+            "Vorma-anomalien eksponentielt og usikkerheten vokser videre mot σ ≈ 2 °C og høyere "
+            "etter hvert som vi går utover datahorisonten. "
             f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS:.0f} t, der "
             "Met.no-vindvarselet fortsatt er pålitelig) utvides og skjeves usikkerhetsbåndet "
             "nedover når prognosert vindenergi nærmer seg advarsel-/alarmterskel – "
