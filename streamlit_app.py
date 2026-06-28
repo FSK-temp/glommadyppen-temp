@@ -805,32 +805,216 @@ def page_prediksjon():
 
     st.divider()
 
-    # ── Temperaturprognose ────────────────────────────────────────────────────
-    st.subheader("Temperaturprognose – Fløter'n / Fetsund")
-
+    # ── Bygg prognose tidlig så den er tilgjengelig i hele seksjonen ─────────
     energy_df   = build_wind_energy_series(frost_vind, weather_mjosa)
     forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q,
                                          energy_df=energy_df)
     t_flotern_h, travel_h_now, _, _ = calculate_travel_time(ertesekken_q)
 
+    # ── Prediksjon for arrangementet ──────────────────────────────────────────
+    st.header("Prediksjon for arrangementet")
+
+    # Gyldighetsvindu: vannet som er observert i Vorma nå ankommer Fløter'n om
+    # travel_h_now timer. Innenfor det vinduet er prediksjonen databasert og
+    # pålitelig (σ ≈ MODEL_SIGMA_DATA). Utenfor er det ren ekstrapolering.
+    valid_from_oslo = pd.Timestamp.now(tz='UTC').tz_convert('Europe/Oslo')
+    valid_to_oslo   = (pd.Timestamp.now(tz='UTC') +
+                       pd.Timedelta(hours=travel_h_now)).tz_convert('Europe/Oslo')
+
+    if days_until > 14:
+        st.info(
+            f"ℹ️ Prediksjonen nedenfor viser **nåværende forhold**, ikke en prognose for august. "
+            f"Det er {days_until} dager til GlommaDyppen ({oslo_dt.strftime('%-d. %B %Y')}). "
+            f"Dagens temperaturmåling i Vorma ved Svanefoss er **direkte gyldig** for "
+            f"Fløter'n frem til ca. **{valid_to_oslo.strftime('%-d. %b kl %H:%M')}** "
+            f"(transporttid {travel_h_now:.0f} t). Etter det er prognosen ekstrapolering "
+            f"med økende usikkerhet – se dagsprognose-rad og graf under."
+        )
+    else:
+        st.success(
+            f"✅ Prediksjon for arrangementet er aktiv ({days_until} dager igjen). "
+            f"Vorma-observasjoner er direkte gyldige for **Fløter'n** de neste "
+            f"{travel_h_now:.0f} t (frem til {valid_to_oslo.strftime('%-d. %b kl %H:%M')})."
+        )
+
+    prediction = predict_fetsund_temperature(
+        primary_df, ertesekken_q, event_date,
+        fetsund_temp_df=fetsund_temp,
+    )
+
+    if data_age_days > 30 and days_until > 30:
+        st.info(
+            "Sanntidsprediksjon krever ferske Vorma-målinger. "
+            "Aktiveres når stasjonen starter opp igjen (april 2026)."
+        )
+    elif prediction:
+        pred_temp = prediction['predicted_temp']
+
+        # To-regime sigma: innenfor datahorisonten er usikkerheten liten og
+        # flat (MODEL_SIGMA_DATA); utenfor vokser den med √(ekstrapoleringstid).
+        h_until    = max(0.0, (event_date - pd.Timestamp.now(tz='UTC')
+                               ).total_seconds() / 3600)
+        ramp_ev    = min(1.0, h_until / max(travel_h_now, 1))
+        extrap_ev  = max(0.0, h_until - travel_h_now)
+        sigma      = (MODEL_SIGMA_DATA * ramp_ev
+                      + (MODEL_SIGMA - MODEL_SIGMA_DATA) * np.sqrt(extrap_ev / 24.0))
+        lb         = max(pred_temp - 1.96 * sigma, TEMP_HIST_LOWER)
+        ub         = min(pred_temp + 1.96 * sigma, TEMP_HIST_UPPER)
+
+        risk_label, risk_color, ws_label, ws_color, risk_details = \
+            assess_risk_open_water(pred_temp, weather_mjosa, seiche_risk=seiche)
+
+        # Gyldighets-tag i kortet
+        if h_until <= travel_h_now:
+            validity_tag = (f"Databasert · gyldig for Fløter'n frem til "
+                            f"{valid_to_oslo.strftime('%-d. %b kl %H:%M')} · σ ≈ {sigma:.1f} °C")
+        else:
+            validity_tag = (f"Ekstrapolering · Vorma-data gyldig til "
+                            f"{valid_to_oslo.strftime('%-d. %b kl %H:%M')} · σ ≈ {sigma:.1f} °C")
+
+        st.markdown(
+            f"""
+            <div style="
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                border-left: 5px solid {risk_color};
+                border-radius: 8px;
+                padding: 12px 18px;
+                background: {risk_color}14;
+                margin-bottom: 12px;
+            ">
+                <div style="text-align:center; min-width:72px;">
+                    <div style="font-size:2.0em; font-weight:700;
+                                color:{risk_color}; line-height:1.1;">
+                        {pred_temp:.1f}°C
+                    </div>
+                    <div style="font-size:11px; color:#888; margin-top:2px;">
+                        Fløter'n / Fetsund
+                    </div>
+                </div>
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:600; font-size:0.95em;">
+                        {risk_label}
+                    </div>
+                    <div style="font-size:0.82em; color:#666; margin-top:3px;">
+                        {ws_label}
+                        &nbsp;·&nbsp;
+                        95&nbsp;%&nbsp;KI:&nbsp;{lb:.1f}–{ub:.1f}&nbsp;°C
+                        &nbsp;·&nbsp;
+                        Fløter'n:&nbsp;{prediction['travel_hours_flotern']:.0f}&nbsp;t
+                        &nbsp;·&nbsp;
+                        Fetsund:&nbsp;{prediction['travel_hours']:.0f}&nbsp;t
+                    </div>
+                    <div style="font-size:0.78em; color:#999; margin-top:2px;">
+                        {validity_tag}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Vis detaljer og risikovurdering", expanded=False):
+            for d in risk_details:
+                st.markdown(f"- {d}")
+            st.markdown("---")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Vorma nå",              f"{prediction['vorma_temp']:.1f} °C",
+                      delta=f"{prediction['anomaly']:+.1f} °C avvik")
+            c2.metric("Fetsund baseline",       f"{prediction['fetsund_baseline']:.1f} °C",
+                      help=prediction['baseline_source'])
+            c3.metric("Transporttid Fløter'n",  f"{prediction['travel_hours_flotern']} t",
+                      help=f"t = 7670 / {prediction['q_used']:.0f} m³/s")
+            c4.metric("Pålitelighet",           f"{prediction['confidence']*100:.0f} %")
+            st.caption(
+                f"Modell: T_pred = Fetsund_baseline + Vorma_anomali × κ "
+                f"(κ = {TEMPERATURE_SURVIVAL}). "
+                f"Validert mot data fra juli og august 2018–2025. "
+                "Bruk med forsiktighet utenfor sommermånedene."
+            )
+    else:
+        st.warning("⚠️ Ikke nok data for prediksjon.")
+
+    # ── Dagsprognose – eksplisitt +2/+3/+4 dager ─────────────────────────────
+    st.subheader("Dagsprognose")
+    st.caption(
+        f"Frem til datahorisonten (+{travel_h_now:.0f} t) er prediksjonen basert på "
+        f"**observert vann i Vorma** og er relativt pålitelig (σ ≈ {MODEL_SIGMA_DATA} °C). "
+        f"Etter det er den ekstrapolering – kun vindenergi-signalet (E) gir "
+        f"reell fremoverskuende informasjon (AUC = 0,87 for ΔT < −3 °C)."
+    )
+
+    HORIZONS = [
+        (f"Nå–+{travel_h_now:.0f} t\n(databasert)", travel_h_now),
+        ("+2 dager",  48),
+        ("+3 dager",  72),
+        ("+4 dager",  96),
+    ]
+
+    _RISK_EMOJI = {"lav": "🟢", "advarsel": "🟡", "alarm": "🔴"}
+
+    if not forecast_df.empty:
+        fcols = st.columns(4)
+        for i, (label, h) in enumerate(HORIZONS):
+            # Finn raden nærmest h timer frem i tid
+            now_utc = pd.Timestamp.now(tz='UTC')
+            target_t = now_utc + pd.Timedelta(hours=h)
+            fc_t = pd.to_datetime(forecast_df['time'])
+            if fc_t.dt.tz is None:
+                fc_t = fc_t.dt.tz_localize('UTC')
+            idx = (fc_t - target_t).abs().idxmin()
+            row = forecast_df.loc[idx]
+
+            pred   = row['predicted']
+            lo68   = row['lower_68']
+            hi68   = row['upper_68']
+            risk   = row.get('wind_risk_level') or ('–' if h > travel_h_now else 'databasert')
+            e_fc   = row.get('wind_E_forecast')
+
+            if h <= travel_h_now:
+                # Innenfor datahorisonten: vis lav, pålitelig usikkerhet
+                delta_str  = f"{lo68:.1f}–{hi68:.1f} °C  ✅ databasert"
+                delta_col  = "off"
+                help_str   = (f"Basert på observert vann i Vorma – "
+                              f"σ ≈ {MODEL_SIGMA_DATA} °C (validert MAE ~0,5–0,6 °C)")
+            else:
+                emoji      = _RISK_EMOJI.get(risk, "⚪")
+                e_str      = f"  E={e_fc}" if e_fc and e_fc != "ingen prognose" else ""
+                delta_str  = f"{lo68:.1f}–{hi68:.1f} °C  {emoji} {risk}{e_str}"
+                delta_col  = ("inverse"
+                              if risk in ("advarsel", "alarm") else "off")
+                help_str   = (f"Ekstrapolering fra nå-tilstand med eksponentielt avtagende "
+                              f"anomali. Vindrisiko-nivå basert på prognosert SE/S-vindenergi "
+                              f"fra Met.no (AUC = 0,87 for ΔT < −3 °C).")
+
+            fcols[i].metric(
+                label, f"{pred:.1f} °C",
+                delta=delta_str,
+                delta_color=delta_col,
+                help=help_str,
+            )
+    else:
+        st.warning("Ikke nok data for dagsprognose.")
+
+    st.divider()
+
+    # ── Temperaturprognose (graf) ─────────────────────────────────────────────
+    st.subheader("Temperaturprognose – Fløter'n / Fetsund")
+
     if not forecast_df.empty:
         fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now)
         st.plotly_chart(fig_fc, use_container_width=True)
         st.caption(
-            "Solid linje: Observert (Fetsund) · Stiplet linje: prediksjon. "
-            "Prediksjonen gjelder startpunktet og sluttpunktet for Glommadyppen (**Fløter'n**) "
-            " — temperaturen er i praksis lik ved begge punkter med en forsinkelse på 4-5t. "
-            f"Datahorisonten (+{travel_h_now:.0f} t) markerer der Vorma-observasjoner gir "
-            "direkte grunnlag (σ vokser svakt fra 0 til ≈0,6 °C – kun κ/transporttid-residual, "
-            "siden vi her faktisk kjenner vannet som er på vei). Etter dette ekstrapoleres "
-            "Vorma-anomalien eksponentielt og usikkerheten vokser videre mot σ ≈ 2 °C og høyere "
-            "etter hvert som vi går utover datahorisonten. "
-            f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS:.0f} t, der "
-            "Met.no-vindvarselet fortsatt er pålitelig) utvides og skjeves usikkerhetsbåndet "
-            "nedover når prognosert vindenergi nærmer seg advarsel-/alarmterskel – "
-            "selve prediksjonslinjen er **ikke** justert, siden sammenhengen mellom "
-            "vindenergi og temperaturfallets størrelse er for usikker (R² ≈ 0,08) til å "
-            "brukes som punktestimat."
+            "Solid linje: observert (Fetsund) · stiplet linje: prediksjon · "
+            f"grått bånd: 68 % KI · lyst bånd: 95 % KI. "
+            f"**Frem til datahorisonten (+{travel_h_now:.0f} t)** er prediksjonen basert på "
+            f"observert vann i Vorma og har lav usikkerhet (σ ≈ {MODEL_SIGMA_DATA} °C). "
+            f"**Etter datahorisonten** ekstrapoleres anomalien eksponentielt og usikkerheten "
+            f"vokser mot σ ≈ {MODEL_SIGMA} °C og videre. "
+            f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS} t) vil båndet "
+            "skjeves nedover og utvides dersom SE/S-vindvarselet overskrider "
+            f"advarsel- ({ENERGY_WARN:.0f} m·h) eller alarmterskelen ({ENERGY_THRESHOLD:.0f} m·h)."
         )
     else:
         st.warning("Ikke nok data for prognosevisning.")
