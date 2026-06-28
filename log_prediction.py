@@ -174,12 +174,26 @@ def get_worksheet():
     return ws
 
 
+def _sanitize(v):
+    """Konverterer numpy-typer og NaN til JSON-kompatible Python-typer."""
+    import math
+    if v is None:
+        return ""
+    if isinstance(v, float) and math.isnan(v):
+        return ""
+    # numpy skalarer → native Python
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float) and math.isnan(v):
+        return ""
+    return v if v is not None else ""
+
+
 def append_row(ws, row_dict):
     existing = ws.get_all_values()
     if not existing or not any(existing[0]):
         ws.append_row(HEADER, value_input_option="RAW")
-    values = [row_dict.get(col, "") if row_dict.get(col, "") is not None else ""
-              for col in HEADER]
+    values = [_sanitize(row_dict.get(col)) for col in HEADER]
     ws.append_row(values, value_input_option="RAW")
 
 
