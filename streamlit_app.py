@@ -28,7 +28,7 @@ st.set_page_config(
     page_title="GlommaDyppen Temperatur",
     page_icon="🏊‍♂️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # ============================================================================
@@ -253,6 +253,114 @@ def _daily_forecast_table_fetsund(df, days=10):
         })
     return pd.DataFrame(rows)
 
+
+
+# ============================================================================
+# MOBILE CSS
+# Injiserer responsiv CSS slik at 4-kolonner brytes til 2×2 på smale skjermer,
+# heading-størrelser skaleres ned og tabeller får horisontal scroll.
+# ============================================================================
+
+def _inject_mobile_css():
+    """Inject responsive CSS for better mobile/tablet display."""
+    st.markdown("""
+    <style>
+    /* ═══════════════════════════════════════════════════════════════════════
+       GlommaDyppen – mobilvisning
+       Tillater at Streamlit-kolonner brytes over flere linjer på smale
+       skjermer, slik at 4-kolonne layouts blir til 2×2 (og 1 kolonne
+       på svært smale skjermer).
+    ═══════════════════════════════════════════════════════════════════════ */
+
+    @media screen and (max-width: 768px) {
+
+        /* ── Kolonne-wrapping ─────────────────────────────────────────── */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.25rem 0.5rem !important;
+        }
+        [data-testid="column"] {
+            min-width: calc(48% - 0.5rem) !important;
+            flex: 1 1 calc(48% - 0.5rem) !important;
+        }
+
+        /* ── Hoved-padding ────────────────────────────────────────────── */
+        .main .block-container {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-top: 0.75rem !important;
+            max-width: 100% !important;
+        }
+
+        /* ── Overskrifter ─────────────────────────────────────────────── */
+        h1 { font-size: 1.35rem !important; line-height: 1.25 !important; }
+        h2 { font-size: 1.15rem !important; }
+        h3 { font-size: 1.05rem !important; }
+
+        /* ── Metric-widgets ───────────────────────────────────────────── */
+        [data-testid="stMetricValue"] {
+            font-size: 1.05rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.68rem !important;
+            line-height: 1.2 !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 0.65rem !important;
+        }
+
+        /* ── Dataframe – horisontal scroll på mobil ───────────────────── */
+        [data-testid="stDataFrame"] > div {
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+        }
+
+        /* ── Tabs: mindre font ────────────────────────────────────────── */
+        [data-testid="stTabs"] [data-testid="stMarkdownContainer"] p {
+            font-size: 0.85rem !important;
+        }
+        button[data-baseweb="tab"] {
+            padding: 6px 10px !important;
+            font-size: 0.80rem !important;
+        }
+
+        /* ── Caption / expander ───────────────────────────────────────── */
+        [data-testid="stCaptionContainer"] p {
+            font-size: 0.76rem !important;
+        }
+        [data-testid="stExpander"] summary {
+            font-size: 0.88rem !important;
+        }
+
+        /* ── Mobile-navigasjonshint: vis ──────────────────────────────── */
+        .gd-mobile-hint {
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            background: #eef3fb;
+            border-radius: 8px;
+            padding: 7px 14px;
+            font-size: 0.82rem;
+            color: #4472C4;
+            margin-bottom: 0.75rem;
+            border: 1px solid #c8d8f0;
+        }
+    }
+
+    /* Skjul hint på desktop */
+    .gd-mobile-hint { display: none; }
+
+    @media screen and (max-width: 480px) {
+        /* Svært smal skjerm (eldre telefoner): én kolonne */
+        [data-testid="column"] {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        h1 { font-size: 1.15rem !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # ============================================================================
 # WIND ENERGY FUNCTIONS
@@ -770,15 +878,16 @@ def page_prediksjon():
             f"""
             <div style="
                 display: flex;
+                flex-wrap: wrap;
                 align-items: center;
-                gap: 20px;
+                gap: 14px 20px;
                 border-left: 5px solid {risk_color};
                 border-radius: 8px;
                 padding: 12px 18px;
                 background: {risk_color}14;
                 margin-bottom: 12px;
             ">
-                <div style="text-align:center; min-width:72px;">
+                <div style="text-align:center; min-width:72px; flex-shrink:0;">
                     <div style="font-size:2.0em; font-weight:700;
                                 color:{risk_color}; line-height:1.1;">
                         {pred_temp:.1f}°C
@@ -787,7 +896,7 @@ def page_prediksjon():
                         Fløter'n / Fetsund
                     </div>
                 </div>
-                <div style="flex:1; min-width:0;">
+                <div style="flex:1; min-width:200px;">
                     <div style="font-weight:600; font-size:0.95em;">
                         {risk_label}
                     </div>
@@ -898,7 +1007,7 @@ def page_prediksjon():
 
     if not forecast_df.empty:
         fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now)
-        st.plotly_chart(fig_fc, use_container_width=True)
+        st.plotly_chart(fig_fc, use_container_width=True, config={"responsive": True})
         st.caption(
             "Solid linje: observert (Fetsund) · stiplet linje: prediksjon · "
             f"grått bånd: 68 % KI · lyst bånd: 95 % KI. "
@@ -952,7 +1061,7 @@ def page_prediksjon():
             if not energy_df.empty:
                 fig_e = _wind_energy_chart(energy_df)
                 if fig_e:
-                    st.plotly_chart(fig_e, use_container_width=True)
+                    st.plotly_chart(fig_e, use_container_width=True, config={"responsive": True})
                 st.caption(
                     f"E = Σ v_i × Δtᵢ for alle obs der vindretning ∈ 135–225° (SE/S), "
                     f"48-timers rullende vindu med 24 t lead-tid. "
@@ -966,7 +1075,7 @@ def page_prediksjon():
         with wind_tabs[1]:
             chart = _wind_forecast_chart(weather_mjosa.head(120), "Vindvarsel – Mjøsa")
             if chart:
-                st.plotly_chart(chart, use_container_width=True)
+                st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
 
 
 # ============================================================================
@@ -1017,7 +1126,7 @@ def page_data_varsel():
             'Svanefoss': sv_temp, 'Funnefoss': fn_temp,
             'Blaker':    bl_temp, 'Fetsund':   fe_temp,
         }, "Vanntemperatur – siste 7 dager")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
 
         st.caption("""
         **Stasjoner:**
@@ -1052,7 +1161,7 @@ def page_data_varsel():
         fig = _discharge_chart({
             'Ertesekken': er_q, 'Funnefoss': fn_q, 'Blaker': bl_q,
         }, "Vannføring – siste 7 dager")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
 
         st.subheader("Transporttid-kalkulator")
         q_now = er_q.iloc[-1]['value'] if not er_q.empty else FALLBACK_DISCHARGE
@@ -1093,7 +1202,7 @@ def page_data_varsel():
 
             chart = _wind_obs_chart(frost_vind, f"Vindmålinger – {FROST_STATION_KISE} Kise")
             if chart:
-                st.plotly_chart(chart, use_container_width=True)
+                st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
 
             with st.expander("Vis rådata (Frost API)", expanded=False):
                 disp = frost_vind.copy()
@@ -1123,7 +1232,7 @@ def page_data_varsel():
                     st.dataframe(tbl, use_container_width=True, hide_index=True)
                 chart = _wind_forecast_chart(fc_mjosa_s, "Vindvarsel – Mjøsa")
                 if chart:
-                    st.plotly_chart(chart, use_container_width=True)
+                    st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
 
         with col_fetsund:
             st.markdown("### 🏁 Fetsund lenser (mål)")
@@ -1136,7 +1245,7 @@ def page_data_varsel():
                     st.dataframe(tbl, use_container_width=True, hide_index=True)
                 chart = _weather_fetsund_chart(fc_fetsund, "Værvarsler – Fetsund lenser")
                 if chart:
-                    st.plotly_chart(chart, use_container_width=True)
+                    st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
 
         st.info("""
         **Om oppvellings-indikatoren (SE/S-vind):**
@@ -1150,6 +1259,14 @@ def page_data_varsel():
 # ============================================================================
 
 def main():
+    _inject_mobile_css()
+    # Navigasjonshint: vises kun på smale skjermer (CSS display:none på desktop)
+    st.markdown(
+        '''<div class="gd-mobile-hint">
+        ☰&nbsp; Trykk på menyen øverst til venstre for å navigere mellom sidene
+        </div>''',
+        unsafe_allow_html=True,
+    )
     with st.sidebar:
         st.markdown(
             '<a href="https://glommadyppen.no" target="_blank">'
