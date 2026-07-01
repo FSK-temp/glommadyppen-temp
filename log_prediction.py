@@ -174,26 +174,18 @@ def get_worksheet():
     return ws
 
 
-def _sanitize(v):
-    """Konverterer numpy-typer og NaN til JSON-kompatible Python-typer."""
-    import math
-    if v is None:
-        return ""
-    if isinstance(v, float) and math.isnan(v):
-        return ""
-    # numpy skalarer → native Python
-    if hasattr(v, "item"):
-        v = v.item()
-    if isinstance(v, float) and math.isnan(v):
-        return ""
-    return v if v is not None else ""
-
-
 def append_row(ws, row_dict):
     existing = ws.get_all_values()
     if not existing or not any(existing[0]):
         ws.append_row(HEADER, value_input_option="RAW")
-    values = [_sanitize(row_dict.get(col)) for col in HEADER]
+    # NB: pd.notna() er nødvendig her, ikke bare "is not None" - verdier fra
+    # forecast_df.loc[idx] (f.eks. windE_fc_h{h}/windrisk_h{h} utenfor
+    # vindrisiko-horisonten) blir NaN, ikke None, når pandas henter ut en rad
+    # som blander tall- og strengkolonner. "NaN is not None" er True, så en
+    # ren None-sjekk slipper NaN gjennom til gspread (ugyldig JSON / "nan"
+    # skrevet til arket). Se samme fiks i streamlit_app.py sin Dagsprognose.
+    values = [v if pd.notna(v) else "" for v in
+              (row_dict.get(col, "") for col in HEADER)]
     ws.append_row(values, value_input_option="RAW")
 
 
