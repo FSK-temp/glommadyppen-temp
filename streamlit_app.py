@@ -648,22 +648,21 @@ def page_informasjon():
 
     st.subheader("Ettereffekt – forsinket kaldpuls fra Mjøsa")
     st.markdown("""
-    Etter at sørlig vind har presset det varme overflatelaget mot sørenden av Mjøsa
-    og drevet kaldt bunnvann (hypolimnion) opp mot Minnesund, vil **sprangsjiktet
-    fortsette å oscillere** som en pendel selv etter at vinden har lagt seg.
-    Denne indre bølgen (seiché) er beskrevet av Thendrup (1978) med en halvperiode på
-    typisk **5–8 dager** ved normal sommerstratifisering.
+    Etter at vind fra sør har presset det varme overflatelaget mot nordenden av Mjøsa
+    og drevet kaldt bunnvann opp mot Minnesund, vil sjiktet mellom kaldt og varmt vann 
+    fortsette å pendle opp og ned selv etter at vinden har lagt seg.
+    Denne indre bølgen (seiché) er har en halvperiode på typisk 5–8 dager på en normal sommer.
 
-    Praktisk konsekvens: en ny kaldpuls kan nå Glomma **5–12 dager etter den første**,
+    Praktisk konsekvens: en ny kaldpuls kan nå Glomma 5–12 dager etter den første,
     uten nytt vindpådriv. Modellen overvåker dette og viser en forhøyet risikoindikator
     i dette tidsvinduet.
 
     | Kriterium for ettereffekt | Verdi |
     |---|---|
-    | Primær bunn ved Minnesund | < 10 °C |
-    | Minimum temperaturdropp (ΔT) | ≥ 3 °C under 7-dagers baseline |
+    | Primær bunntemp ved Minnesund | < 10 °C |
+    | Minimum temperaturdropp (ΔT) | ≥ 3 °C under en 7-dagers periode |
     | Forhøyet risikovindu | Dag 5–12 etter primær bunn |
-    | Typisk halvperiode | 8–9 dager |
+    | Typisk halvperiode | 5-8 dager |
 
     **Validering 2015–2025 (682 juli–august-dager, Fetsund < 18 °C = «kaldt»):**
 
