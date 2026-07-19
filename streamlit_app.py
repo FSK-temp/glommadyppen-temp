@@ -523,7 +523,7 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
             ))
         hover_cols = ['lower_68', 'upper_68', 'lower_95', 'upper_95']
         hover_template = (
-            '<b>Prediksjon</b>: %{y:.1f} °C<br>'
+            '<b>Dipp Prediksjon</b>: %{y:.1f} °C<br>'
             '68 % KI: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
             '95 % KI: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
         )
@@ -1188,7 +1188,7 @@ def main():
         st.markdown("---")
         page = st.radio(
             "Navigasjon",
-            options=["Om siden", "Observasjoner og værvarsel", "Prediksjon"],
+            options=["Om siden", "Observasjoner og værvarsel", "Dipp Prediksjon"],
             label_visibility="collapsed",
         )
         st.markdown("---")
