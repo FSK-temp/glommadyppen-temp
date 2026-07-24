@@ -222,13 +222,28 @@ def _daily_forecast_table(df, days=10):
         avg_s = d['southerly_wind'].mean()
         risiko_ikon = ("🔴" if avg_s >= CRITICAL_WIND_SPEED else
                        "🟡" if avg_s >= 1.2 else "🟢")
+
+        # Sirkulært middel – aritmetisk snitt av kompasskurser er feil og ga
+        # tidligere utslag som "204° (SV)" for døgn uten én eneste SE/S-time.
+        mean_dir = circular_mean_deg(d['wind_direction'])
+        conc     = circular_concentration(d['wind_direction'])
+        ses_hrs  = int((d['southerly_wind'] > 0).sum())
+        if not np.isfinite(mean_dir):
+            dir_txt = "–"
+        elif conc < 0.35:
+            # Retningen snurrer; et døgnmiddel er ikke meningsbærende.
+            dir_txt = "vekslende"
+        else:
+            dir_txt = f"{mean_dir:.0f}° ({wind_rose_label(mean_dir)})"
+
         rows.append({
             'Dato':          pd.to_datetime(date).strftime('%a %d.%m'),
             'Lufttemp':      f"{d['air_temperature'].min():.0f}–{d['air_temperature'].max():.0f} °C",
             'Vind gj.snitt': f"{d['wind_speed'].mean():.1f} m/s",
             'Vind maks':     f"{d['wind_speed'].max():.1f} m/s",
-            'Retning':       f"{d['wind_direction'].mean():.0f}° ({wind_rose_label(d['wind_direction'].mean())})",
+            'Retning':       dir_txt,
             'SE/S-vind':     f"{avg_s:.1f} m/s",
+            'Timer SE/S':    f"{ses_hrs} t",
             'Oppv.risiko':   risiko_ikon,
         })
     return pd.DataFrame(rows)
@@ -369,7 +384,13 @@ def _inject_mobile_css():
 
 
 def _wind_energy_chart(energy_df,
-                       title="Kumulativ SE/S-vindenergi – oppvellingsrisiko"):
+                       title="Kumulativ SE/S-vindenergi – oppvellingsrisiko",
+                       decision_win=None):
+    """
+    decision_win: (t_start, t_slutt) – vinduet for vindpådriv som faktisk
+    påvirker temperaturen på stevnedagen. Skyggelegges i grafen slik at en
+    E-topp UTENFOR vinduet ikke feiltolkes som risiko for arrangementet.
+    """
     if energy_df is None or energy_df.empty:
         return None
 
@@ -395,6 +416,16 @@ def _wind_energy_chart(energy_df,
             'SE/S vindstyrke per tidssteg',
         ),
     )
+
+    if decision_win is not None:
+        _ws, _we = decision_win[0], decision_win[1]
+        fig.add_vrect(x0=_ws, x1=_we,
+                      fillcolor='rgba(25,135,84,0.10)', line_width=0,
+                      annotation_text='Vinduet som påvirker stevnedagen',
+                      annotation_position='top left',
+                      annotation_font_size=11, row=1, col=1)
+        fig.add_vrect(x0=_ws, x1=_we,
+                      fillcolor='rgba(25,135,84,0.10)', line_width=0, row=2, col=1)
 
     fig.add_hrect(y0=ENERGY_THRESHOLD, y1=y_max,
                   fillcolor='rgba(220,53,69,0.09)',  line_width=0, row=1, col=1)
@@ -779,24 +810,44 @@ def page_prediksjon():
         c3.metric("Vind (Mjøsa)", "N/A")
 
     t_flotern, t_fetsund, q_val, q_src = calculate_travel_time(ertesekken_q)
+    _pct_q  = discharge_percentile(q_val)
+    _t_norm = TRANSPORT_COEFF / FALLBACK_DISCHARGE
+    _q_txt  = (f"Q = {q_val:.0f} m³/s · {_pct_q:.0f}. persentil"
+               if _pct_q is not None else f"Q = {q_val:.0f} m³/s")
     c4.metric(
         "Transporttid Fløter'n",
         f"{t_flotern} t",
-        delta=f"Fetsund: {t_fetsund} t",
+        delta=f"Fetsund: {t_fetsund} t · {_q_txt}",
         delta_color="off",
-        help=f"Fløter'n: t = 7670 / {q_val:.0f} m³/s ({q_src}) · "
-             f"Fetsund: t = 9700 / {q_val:.0f} m³/s"
+        help=f"Fløter'n: t = {TRANSPORT_COEFF_FLOTERN} / {q_val:.0f} m³/s ({q_src}) · "
+             f"Fetsund: t = {TRANSPORT_COEFF} / {q_val:.0f} m³/s. "
+             f"Normalår (Q = {FALLBACK_DISCHARGE:.0f}) gir ca. {_t_norm:.0f} t til Fetsund. "
+             "Transporttiden skalerer som 1/Q og styrer hele prediksjonsvinduet."
     )
+
+    if _pct_q is not None and _pct_q <= 15:
+        st.info(
+            f"**Uvanlig lav vannføring** – Q = {q_val:.0f} m³/s ligger på "
+            f"{_pct_q:.0f}. persentil av juli–august-klimatologien. Transporttiden "
+            f"til Fetsund er {t_fetsund} t mot ~{_t_norm:.0f} t i et normalår. "
+            "Praktisk konsekvens: vannet som ankommer målet er allerede i Vorma "
+            "nesten to døgn i forveien, så observasjon ved Svanefoss er en bedre "
+            "kilde enn vindvarselet de siste dagene før stevnet.",
+            icon="🐢",
+        )
 
     # ── Seiche-ettereffekt banner ─────────────────────────────────────────────
     # Vorma anses "stigende" når temperaturen har økt > 0,2 °C de siste 24 t.
     # I så fall er en ny (tredje) kalddipp i samme periode lite sannsynlig, og
     # varselet nedgraderes til en info om at oppgangen forventes å forplante
     # seg nedstrøms til Fløter'n/Fetsund.
+    # detect_seiche_risk() bruker nå stigende/gjenopprettet Vorma som PRIMÆRPORT
+    # (seiche['oscillating']), ikke som etterhåndsnedgradering. vorma_rising
+    # beholdes for tekstvalget under.
     vorma_rising = (len(primary_df) >= 24 and
                      (latest_val - primary_df.iloc[-24]['value']) > 0.2)
 
-    if seiche['active'] and vorma_rising:
+    if seiche.get('episode_date') is not None and not seiche.get('oscillating', True):
         ep_date_oslo = seiche['episode_date'].tz_convert(
             'Europe/Oslo').strftime('%-d. %b kl %H:%M')
         st.info(
@@ -813,18 +864,58 @@ def page_prediksjon():
         ep_date_oslo = seiche['episode_date'].tz_convert(
             'Europe/Oslo').strftime('%-d. %b kl %H:%M')
         days_rem = seiche['days_remaining']
-        st.warning(
+        st.info(
             f"**Seiche-ettereffekt aktiv** – forhøyet risiko for sekundær kaldpuls\n\n"
             f"En bekreftet kald episode ble registrert ved Minnesund for "
             f"**{seiche['days_ago']:.1f} dager siden** "
             f"({ep_date_oslo}, min {seiche['episode_min_T']:.1f} °C, "
             f"ΔT = {seiche['episode_dT']:.1f} °C). "
-            f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls – "
-            f"typisk opptrer sekundærdroppen 5–12 dager etter primær bunn. "
-            f"**Forhøyet risikovindu varer i ca. {days_rem:.0f} dager til.**\n\n",
+            f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls. "
+            f"Vinduet løper ca. **{days_rem:.0f} dager til**.\n\n"
+            f"*Om styrken på dette signalet:* intervallene mellom påfølgende "
+            f"kuldeepisoder (n = 58, 2015–2025) har median 11,5 dager og kvartiler "
+            f"8–15. 5–12-dagersvinduet fanger 57 % av alle intervaller, men er "
+            f"8 dager bredt mot en median syklus på 11,5 – det diskriminerer derfor "
+            f"svakt, og den betingede risikoen er flat gjennom vinduet framfor "
+            f"avtagende. Filtrert til episoder uten nytt vindpådriv står bare "
+            f"n = 6 igjen. Behandle dette som en påminnelse, ikke som et varsel.\n\n",
             icon="🌊",
         )
 
+
+    # ── Observasjonsdrevet modus ────────────────────────────────────────────
+    # Når transporttiden er lengre enn tiden fram til arrangementet, er vannet
+    # som ankommer målet allerede i Vorma. Prediksjonen er da en observasjon med
+    # etterslep, ikke en prognose, og usikkerheten faller til MODEL_SIGMA_DATA.
+    _event_dt = calculate_event_date(EVENT_YEAR)
+    _hours_to_event = (_event_dt - pd.Timestamp.now(tz='UTC')).total_seconds() / 3600
+    if 0 < _hours_to_event <= t_fetsund and not primary_df.empty:
+        _fe_base = (fetsund_temp['value'].tail(48).median()
+                    if not fetsund_temp.empty else latest_val + 1.5)
+        _sv_base = primary_df['value'].tail(48).median()
+        st.success(
+            f"**Observasjonsdrevet modus** – vannet som ankommer målet er allerede i Vorma\n\n"
+            f"Transporttid til Fetsund er **{t_fetsund} t**, og det er "
+            f"**{_hours_to_event:.0f} t** til start. Prediksjonen for stevnedagen "
+            f"hviler nå på målinger, ikke på vindvarsel. Usikkerheten er tilsvarende "
+            f"redusert til ±{MODEL_SIGMA_DATA:.1f} °C (1σ).",
+            icon="🎯",
+        )
+        _rows = []
+        for _sv in [_sv_base + 2, _sv_base, _sv_base - 2, _sv_base - 4,
+                    _sv_base - 6, _sv_base - 8]:
+            _rows.append({
+                'Svanefoss nå': f"{_sv:.1f} °C",
+                f'→ Fetsund om {t_fetsund} t':
+                    f"{_fe_base + (_sv - _sv_base) * TEMPERATURE_SURVIVAL:.1f} °C",
+            })
+        with st.expander("Oppslagstabell: Svanefoss nå → Fetsund på stevnedagen", expanded=False):
+            st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+            st.caption(
+                f"T_Fetsund = {_fe_base:.1f} + (T_Svanefoss − {_sv_base:.1f}) × "
+                f"{TEMPERATURE_SURVIVAL:.2f}. Baselinjer er 48-timers medianer. "
+                "Bruk denne til beslutning i stedet for E-kurven når modusen er aktiv."
+            )
 
     # ── Bygg prognose tidlig så den er tilgjengelig i hele seksjonen ─────────
     energy_df   = build_wind_energy_series(frost_vind, weather_mjosa)
@@ -942,20 +1033,54 @@ def page_prediksjon():
             fc_e   = energy_df[ energy_df['is_forecast']]
             cur_E  = float(obs_e['E'].iloc[-1]) if not obs_e.empty else 0.0
             pct    = round(cur_E / ENERGY_THRESHOLD * 100)
-            fc_E   = float(fc_e['E'].iloc[-1])       if not fc_e.empty else cur_E
-            fc_Ehi = float(fc_e['E_upper'].max())    if not fc_e.empty else cur_E
+
+            # Badgen leste tidligere maks over hele horisonten, men var merket
+            # "dag +5". Nå vises maks EKSPLISITT med datoen den inntreffer, slik
+            # at en topp langt utenfor beslutningsvinduet er synlig som sådan.
+            if not fc_e.empty:
+                i_max  = fc_e['E'].idxmax()
+                fc_Emax = float(fc_e.loc[i_max, 'E'])
+                fc_tmax = pd.to_datetime(fc_e.loc[i_max, 'time']).tz_convert('Europe/Oslo')
+                fc_Ehi  = float(fc_e['E_upper'].max())
+                tmax_txt = fc_tmax.strftime('%-d. %b')
+            else:
+                fc_Emax, fc_Ehi, tmax_txt = cur_E, cur_E, "–"
 
             c1.metric("Kumulativ E nå",   f"{cur_E:.1f} m·h",
-                      help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet")
+                      help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet. "
+                           f"Kalibreringsenhet (Σv delt på {ENERGY_CALIB_DT_HOURS:.0f}) – "
+                           "direkte sammenlignbar med tersklene.")
             c2.metric("Andel av terskel", f"{pct} %",
                       help=f"{ENERGY_THRESHOLD:.0f} m·h = 100 % (AUC = 0.86)")
-            c3.metric("Prognosert E (dag +5)", f"{fc_E:.1f} m·h",
-                      delta="⚠️ Kan overskride terskel!" if fc_Ehi >= ENERGY_THRESHOLD else None,
-                      delta_color="inverse" if fc_Ehi >= ENERGY_THRESHOLD else "normal")
+            c3.metric(f"Maks prognosert E ({tmax_txt})", f"{fc_Emax:.1f} m·h",
+                      delta=("⚠️ Over terskel" if fc_Emax >= ENERGY_THRESHOLD else
+                             "Over advarsel"   if fc_Emax >= ENERGY_WARN else None),
+                      delta_color="inverse" if fc_Emax >= ENERGY_WARN else "normal",
+                      help="Høyeste E i hele varselhorisonten, med dato. "
+                           "Sjekk om datoen ligger innenfor beslutningsvinduet "
+                           "før den tolkes som risiko for stevnedagen.")
+
+            # ── Konsistensvakt ─────────────────────────────────────────────
+            # Hvis dagtabellen sier grønt (ingen SE/S-timer) samme dag som
+            # E-kurven sier over advarselsterskel, er det en datafeil – ikke en
+            # risiko. Vis det som datakvalitetsvarsel, ikke som alarm.
+            if fc_Emax >= ENERGY_WARN and not weather_mjosa.empty:
+                _wm = weather_mjosa.copy()
+                _wm['dt_local'] = pd.to_datetime(_wm['time']).dt.tz_convert('Europe/Oslo')
+                _same_day = _wm[_wm['dt_local'].dt.date == fc_tmax.date()]
+                _ses_hours = int((_same_day['southerly_wind'] > 0).sum()) if not _same_day.empty else 0
+                if _ses_hours == 0:
+                    st.warning(
+                        f"**Datakvalitet:** E-kurven topper på {fc_Emax:.0f} m·h den "
+                        f"{tmax_txt}, men vindvarselet har **null timer** i SE/S-sektoren "
+                        f"(135–225°) det døgnet. De to kildene er inkonsistente – "
+                        "behandle E-toppen som usikker inntil den er verifisert.",
+                        icon="🔍",
+                    )
         else:
             c1.metric("Kumulativ E nå", "N/A")
             c2.metric("Andel av terskel", "N/A")
-            c3.metric("Prognosert E (dag +5)", "N/A")
+            c3.metric("Maks prognosert E", "N/A")
 
         if not weather_mjosa.empty:
             avg_ses = weather_mjosa.head(48)['southerly_wind'].mean()
@@ -968,7 +1093,17 @@ def page_prediksjon():
         wind_tabs = st.tabs(["Kumulativ oppvellingsrisiko", "Vindretning og -hastighet"])
         with wind_tabs[0]:
             if not energy_df.empty:
-                fig_e = _wind_energy_chart(energy_df)
+                _q_now = calculate_travel_time(ertesekken_q)[2]
+                _dw = decision_window(calculate_event_date(EVENT_YEAR), _q_now)
+                fig_e = _wind_energy_chart(energy_df, decision_win=_dw)
+                st.caption(
+                    f"🟩 Grønt felt: vindpådrivet som påvirker stevnedagen – "
+                    f"{_dw[0].tz_convert('Europe/Oslo').strftime('%-d. %b %H:%M')} til "
+                    f"{_dw[1].tz_convert('Europe/Oslo').strftime('%-d. %b %H:%M')} "
+                    f"(samlet etterslep {_dw[2]:.0f} t ved Q = {_q_now:.0f} m³/s). "
+                    "E-topper utenfor dette feltet påvirker vann som ankommer målet "
+                    "før eller etter arrangementet."
+                )
                 if fig_e:
                     st.plotly_chart(fig_e, use_container_width=True, config={"responsive": True})
                 st.caption(
