@@ -32,6 +32,18 @@ import glommadyppen_core as core
 # Ark-ID og fanenavn er definert ETT sted (glommadyppen_core.py) slik at
 # skriving (her) og lesing (appen, via core.read_prediction_log) aldri kan
 # komme ut av synk.
+REQUIRED_CORE_VERSION = "1.7.0"
+if getattr(core, "CORE_VERSION", None) != REQUIRED_CORE_VERSION:
+    # Feil hardt og tidlig. Skriver vi til arket med en gammel kjerne, blir
+    # loggen stille inkonsistent - noen rader med dynamisk κ, andre uten - og
+    # da er den ubrukelig som grunnlag for kalibrering.
+    raise RuntimeError(
+        f"glommadyppen_core.py er versjon "
+        f"{getattr(core, 'CORE_VERSION', 'ukjent (< 1.7.0)')}, "
+        f"men log_prediction.py krever {REQUIRED_CORE_VERSION}. "
+        "Rull ut begge filene sammen."
+    )
+
 SHEET_ID       = os.environ.get("GOOGLE_SHEET_ID", core.PREDICTION_LOG_SHEET_ID)
 WORKSHEET_NAME = core.PREDICTION_LOG_WORKSHEET
 LOG_HORIZONS_H = [24, 48, 72, 96]    # timer frem - matcher WIND_RISK_HORIZON_HOURS
