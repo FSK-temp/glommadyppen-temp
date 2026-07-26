@@ -57,6 +57,13 @@ def fetch_frost_wind(hours_back=168):
     return _core.fetch_frost_wind(hours_back)
 
 
+@st.cache_data(ttl=1800)
+def read_prediction_log():
+    """Prediksjonsloggen fra Google Sheets. Cachet i 30 min - den oppdateres
+    bare én gang i døgnet av GitHub Actions-jobben."""
+    return _core.read_prediction_log()
+
+
 @st.cache_data(ttl=21600)
 def fetch_weather_forecast(lat, lon, days_ahead=14):
     return _core.fetch_weather_forecast(lat, lon, days_ahead)
@@ -222,28 +229,13 @@ def _daily_forecast_table(df, days=10):
         avg_s = d['southerly_wind'].mean()
         risiko_ikon = ("🔴" if avg_s >= CRITICAL_WIND_SPEED else
                        "🟡" if avg_s >= 1.2 else "🟢")
-
-        # Sirkulært middel – aritmetisk snitt av kompasskurser er feil og ga
-        # tidligere utslag som "204° (SV)" for døgn uten én eneste SE/S-time.
-        mean_dir = circular_mean_deg(d['wind_direction'])
-        conc     = circular_concentration(d['wind_direction'])
-        ses_hrs  = int((d['southerly_wind'] > 0).sum())
-        if not np.isfinite(mean_dir):
-            dir_txt = "–"
-        elif conc < 0.35:
-            # Retningen snurrer; et døgnmiddel er ikke meningsbærende.
-            dir_txt = "vekslende"
-        else:
-            dir_txt = f"{mean_dir:.0f}° ({wind_rose_label(mean_dir)})"
-
         rows.append({
             'Dato':          pd.to_datetime(date).strftime('%a %d.%m'),
             'Lufttemp':      f"{d['air_temperature'].min():.0f}–{d['air_temperature'].max():.0f} °C",
             'Vind gj.snitt': f"{d['wind_speed'].mean():.1f} m/s",
             'Vind maks':     f"{d['wind_speed'].max():.1f} m/s",
-            'Retning':       dir_txt,
+            'Retning':       f"{d['wind_direction'].mean():.0f}° ({wind_rose_label(d['wind_direction'].mean())})",
             'SE/S-vind':     f"{avg_s:.1f} m/s",
-            'Timer SE/S':    f"{ses_hrs} t",
             'Oppv.risiko':   risiko_ikon,
         })
     return pd.DataFrame(rows)
@@ -384,13 +376,7 @@ def _inject_mobile_css():
 
 
 def _wind_energy_chart(energy_df,
-                       title="Kumulativ SE/S-vindenergi – oppvellingsrisiko",
-                       decision_win=None):
-    """
-    decision_win: (t_start, t_slutt) – vinduet for vindpådriv som faktisk
-    påvirker temperaturen på stevnedagen. Skyggelegges i grafen slik at en
-    E-topp UTENFOR vinduet ikke feiltolkes som risiko for arrangementet.
-    """
+                       title="Kumulativ SE/S-vindenergi – oppvellingsrisiko"):
     if energy_df is None or energy_df.empty:
         return None
 
@@ -416,16 +402,6 @@ def _wind_energy_chart(energy_df,
             'SE/S vindstyrke per tidssteg',
         ),
     )
-
-    if decision_win is not None:
-        _ws, _we = decision_win[0], decision_win[1]
-        fig.add_vrect(x0=_ws, x1=_we,
-                      fillcolor='rgba(25,135,84,0.10)', line_width=0,
-                      annotation_text='Vinduet som påvirker stevnedagen',
-                      annotation_position='top left',
-                      annotation_font_size=11, row=1, col=1)
-        fig.add_vrect(x0=_ws, x1=_we,
-                      fillcolor='rgba(25,135,84,0.10)', line_width=0, row=2, col=1)
 
     fig.add_hrect(y0=ENERGY_THRESHOLD, y1=y_max,
                   fillcolor='rgba(220,53,69,0.09)',  line_width=0, row=1, col=1)
@@ -503,8 +479,16 @@ def _wind_energy_chart(energy_df,
 
 
 def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
+                    history_df=None, history_horizon=24,
                     title="Temperaturprognose – Fløter'n / Fetsund"):
-    """Kombinert graf: historiske Fetsund-målinger + prediksjon med KI."""
+    """
+    Kombinert graf: historiske Fetsund-målinger + prediksjon med usikkerhetsbånd.
+
+    `history_df` (fra core.prediction_history_series) tegnes som en stiplet
+    linje bakover i tid: hva modellen SA `history_horizon` timer i forveien,
+    plassert på gyldighetstidspunktet. Avstanden mellom den stiplede linjen og
+    den heltrukne observasjonslinjen er treffsikkerheten, direkte avlesbar.
+    """
     fig = go.Figure()
 
     risk_zones = [
@@ -542,7 +526,7 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
                 y=list(band_df['upper_95']) + list(band_df['lower_95'])[::-1],
                 fill='toself', fillcolor='rgba(56,141,228,0.10)',
                 line=dict(color='rgba(0,0,0,0)', width=0),
-                name='95 % KI', hoverinfo='skip',
+                name='95 % område', hoverinfo='skip',
             ))
         if t_fwd:
             fig.add_trace(go.Scatter(
@@ -550,13 +534,13 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
                 y=list(band_df['upper_68']) + list(band_df['lower_68'])[::-1],
                 fill='toself', fillcolor='rgba(56,141,228,0.22)',
                 line=dict(color='rgba(0,0,0,0)', width=0),
-                name='68 % KI', hoverinfo='skip',
+                name='68 % område', hoverinfo='skip',
             ))
         hover_cols = ['lower_68', 'upper_68', 'lower_95', 'upper_95']
         hover_template = (
             '<b>Dipp Prediksjon</b>: %{y:.1f} °C<br>'
-            '68 % KI: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
-            '95 % KI: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
+            '68 %: %{customdata[0]:.1f}–%{customdata[1]:.1f} °C<br>'
+            '95 %: %{customdata[2]:.1f}–%{customdata[3]:.1f} °C'
         )
         if 'wind_E_forecast' in forecast_df.columns:
             hover_cols += ['wind_E_forecast', 'wind_risk_level']
@@ -603,6 +587,30 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
             hovertemplate='<b>Observert</b>: %{y:.1f} °C<extra></extra>',
         ))
 
+    # ── Tidligere prediksjoner (fasit-linjen) ────────────────────────────────
+    if history_df is not None and not history_df.empty:
+        hd = history_df.copy()
+        hd['time'] = pd.to_datetime(hd['time'])
+        if hd['time'].dt.tz is None:
+            hd['time'] = hd['time'].dt.tz_localize('UTC')
+        # Begrens til samme tidsrom som observasjonene, slik at grafen ikke
+        # zoomer ut til hele loggens levetid.
+        if fetsund_obs_df is not None and not fetsund_obs_df.empty:
+            _t0 = pd.to_datetime(fetsund_obs_df['time']).min()
+            if _t0.tzinfo is None:
+                _t0 = _t0.tz_localize('UTC')
+            hd = hd[hd['time'] >= _t0]
+        if not hd.empty:
+            fig.add_trace(go.Scatter(
+                x=hd['time'], y=hd['predicted'],
+                mode='lines+markers',
+                name=f'Predikert {history_horizon} t i forveien',
+                line=dict(color='#BA7517', width=1.8, dash='dash'),
+                marker=dict(size=4),
+                hovertemplate=(f'<b>Prediksjon {history_horizon} t i forveien</b>'
+                               ': %{y:.1f} °C<extra></extra>'),
+            ))
+
     fig.update_layout(
         title=title, xaxis_title='',
         yaxis=dict(title='°C', range=[8, 25], fixedrange=True),
@@ -628,24 +636,56 @@ def page_informasjon():
 
     # ── Kart over målestasjoner ───────────────────────────────────────────────
     st.subheader("Kart over målestasjoner og strekninger")
-    st.image(
-        "kart_malestasjoner.png",
-        caption=(
-            "Oversikt over NVE-målestasjoner langs Vorma og Glomma med GPS-koordinater "
-            "og elveavstander fra Minnesund. Kilde: Anton Vooren / Fet Svømmeklubb."
-        ),
-        use_container_width=True,
-    )
+    # Samme prinsipp som logoen: en manglende bildefil skal ikke ta ned siden.
+    try:
+        st.image(
+            "kart_malestasjoner.png",
+            caption=(
+                "Oversikt over NVE-målestasjoner langs Vorma og Glomma med "
+                "GPS-koordinater og elveavstander fra Minnesund. "
+                "Kilde: Anton Vooren / Fet Svømmeklubb."
+            ),
+            use_container_width=True,
+        )
+    except Exception:
+        st.info("Kartet over målestasjoner er ikke tilgjengelig.")
 
     st.subheader("Prediksjonsmodell")
     st.markdown("""
-    Modellen beregner forventet vanntemperatur langs svømmestrekningene:
+    Modellen predikerer **endringen** i vanntemperatur ved svømmestrekningen:
 
-    **T_pred = Fetsund_baseline + Vorma_anomali × 0,63**
+    **T(t+h) = T_Fetsund(nå) + κ · [ T_Vorma(t−transporttid+h) − T_Vorma(t−transporttid) ]**
 
-    der *Fetsund_baseline* er median av siste 48 timer ved Fetsund,
-    *Vorma_anomali* er gjeldende Vorma-temperatur minus Vormas 48-timers median,
-    og koeffisienten 0,63 er empirisk validert mot 35+ kalde episoder fra 2018–2025.
+    Med andre ord: den temperaturendringen som allerede har skjedd i Vorma, forplanter
+    seg nedover elva og treffer Fetsund én transporttid senere, dempet med faktoren κ.
+
+    Den tidligere nivåformen (Fetsund-baseline + Vorma-anomali × κ) er forlatt fordi
+    Fetsund-baselinen allerede inneholder den kaldpulsen som Vorma-anomalien la til
+    på nytt — den samme pulsen ble talt to ganger. Validert mot 10 552 timer
+    juli–august 2017–2025 (horisont = transporttid):
+
+    | Form | MAE |
+    |---|---|
+    | Nivåform (t.o.m. v1.6) | 0,84 °C |
+    | Ren persistens, ingen modell | 0,74 °C |
+    | **Inkrementform (nå)** | **0,54 °C** |
+
+    #### Uttynningen κ beregnes, den er ikke en konstant
+
+    κ er ikke en fri modellparameter — den **er** Vormas blandingsandel i samløpet
+    med Glomma:
+
+    **κ = Q_Vorma / (Q_Vorma + Q_Glomma)**
+
+    målt ved Ertesekken (2.197.0) og Funnefoss kraftverk (2.412.0). Medianen over
+    juli–august 2017–2025 er **0,633** — praktisk talt identisk med den empiriske
+    episode-κ = 0,63 fra 35 kalde episoder. Den sammenfallende verdien er den
+    sterkeste bekreftelsen på at mekanismen er ren blanding.
+
+    Andelen varierer 0,51–0,76 mellom 5. og 95. persentil i normale somre, og kan
+    falle langt lavere i et Glomma-flomår. Modellen leser derfor vannføringen ved
+    hver kjøring i stedet for å låse κ til 0,63. Mangler Glomma-data, brukes den
+    historiske medianen.
 
     Prediksjonen gjelder startpunktet til **Fløter'n** (Glommadyppen), 35,5 km fra Svanefoss
     og slutpunktet 11 km nedstrøms i Glomma. Temperaturen er i praksis lik ved begge punkter —
@@ -672,8 +712,26 @@ def page_informasjon():
         st.markdown("""
         **Prediksjonen er *ikke* en langtidsprognose:**
         - Mange måneder før arrangementet reflekterer den kun **nåværende forhold**
-        - Usikkerheten er ±2–3 °C (95 % KI)
+        - Utenfor datahorisonten metter usikkerheten mot σ ≈ 2,4 °C
+        - Båndene er risikojusterte, ikke symmetriske konfidensintervaller
         """)
+
+    st.markdown("""
+    #### Usikkerheten skalerer med hvor mye som er i bevegelse
+
+    Residualen er sterkt heteroskedastisk. Målt over de samme 10 552 timene:
+
+    | \\|ΔT_Vorma\\| under transport | 0–0,5 | 0,5–1 | 1–2 | 2–3 | > 3 |
+    |---|---|---|---|---|---|
+    | Standardavvik (°C) | 0,47 | 0,57 | 0,72 | 1,02 | **1,53** |
+
+    En fast σ = 0,6 °C er derfor omtrent riktig i rolige perioder, men altfor smal
+    nettopp når en stor kaldpuls er under transport. Modellen bruker i stedet
+    σ = √(0,45² + (0,33 · |ΔT_Vorma|)²), som gir 71 % dekning i 68 %-båndet og
+    93,5 % i 95 %-båndet. Utenfor datahorisonten vokser σ mot en asymptote på
+    2,4 °C, kalibrert mot hvor stor feilen blir ved ren persistens (1,3 / 1,9 /
+    2,3 / 2,4 °C ved +24/48/72/96 timer).
+    """)
 
     st.divider()
 
@@ -756,19 +814,29 @@ def page_prediksjon():
     c2.metric("Dager igjen", str(max(0, days_until)))
 
     with st.spinner("Henter data…"):
-        primary_df   = fetch_nve_data(STATION_SVANEFOSS,    1003, hours_back=168)
-        if primary_df.empty:
-            primary_df = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=168)
-        fetsund_temp  = fetch_nve_data(STATION_FETSUND,     1003, hours_back=168)
+        # ÉN henting av Vorma-temperatur med det lengste vinduet som trengs.
+        # Seiche-deteksjonen krever 20 døgn (bunnpunkt inntil 12 d tilbake +
+        # 7 d baseline før det); prognosen bruker de siste 7 døgnene av samme
+        # serie. Tidligere ble stasjonen hentet to ganger (168 t og 336 t).
+        vorma_history = fetch_nve_data(STATION_SVANEFOSS, 1003,
+                                       hours_back=SEICHE_HISTORY_HOURS)
+        if vorma_history.empty:
+            vorma_history = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003,
+                                           hours_back=SEICHE_HISTORY_HOURS)
+        primary_df = vorma_history.copy()
+        if not primary_df.empty:
+            _cut = pd.to_datetime(primary_df['time']).max() - pd.Timedelta(hours=168)
+            primary_df = primary_df[pd.to_datetime(primary_df['time']) >= _cut] \
+                             .reset_index(drop=True)
+
+        fetsund_temp  = fetch_nve_data(STATION_FETSUND,      1003, hours_back=168)
         ertesekken_q  = fetch_nve_data(STATION_ERTESEKKEN_Q, 1001, hours_back=168)
+        # Glomma-vannføring: nødvendig for dynamisk uttynning κ = Q_V/(Q_V+Q_G)
+        funnefoss_q   = fetch_nve_data(STATION_FUNNEFOSS_Q,  1001, hours_back=168)
         frost_vind    = fetch_frost_wind(hours_back=168)
         weather_mjosa = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON)
         if not weather_mjosa.empty:
             weather_mjosa = add_southerly_component(weather_mjosa)
-        # 14 dagers historikk for seiche-deteksjon (trenger dag 5–12 tilbake)
-        vorma_history = fetch_nve_data(STATION_SVANEFOSS, 1003, hours_back=336)
-        if vorma_history.empty:
-            vorma_history = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=336)
         seiche = detect_seiche_risk(vorma_history)
 
     if primary_df.empty:
@@ -810,30 +878,42 @@ def page_prediksjon():
         c3.metric("Vind (Mjøsa)", "N/A")
 
     t_flotern, t_fetsund, q_val, q_src = calculate_travel_time(ertesekken_q)
-    _pct_q  = discharge_percentile(q_val)
-    _t_norm = TRANSPORT_COEFF / FALLBACK_DISCHARGE
-    _q_txt  = (f"Q = {q_val:.0f} m³/s · {_pct_q:.0f}. persentil"
-               if _pct_q is not None else f"Q = {q_val:.0f} m³/s")
     c4.metric(
         "Transporttid Fløter'n",
         f"{t_flotern} t",
-        delta=f"Fetsund: {t_fetsund} t · {_q_txt}",
+        delta=f"Fetsund: {t_fetsund} t",
         delta_color="off",
-        help=f"Fløter'n: t = {TRANSPORT_COEFF_FLOTERN} / {q_val:.0f} m³/s ({q_src}) · "
-             f"Fetsund: t = {TRANSPORT_COEFF} / {q_val:.0f} m³/s. "
-             f"Normalår (Q = {FALLBACK_DISCHARGE:.0f}) gir ca. {_t_norm:.0f} t til Fetsund. "
-             "Transporttiden skalerer som 1/Q og styrer hele prediksjonsvinduet."
+        help=f"Fløter'n: t = 7670 / {q_val:.0f} m³/s ({q_src}) · "
+             f"Fetsund: t = 9700 / {q_val:.0f} m³/s"
     )
 
-    if _pct_q is not None and _pct_q <= 15:
-        st.info(
-            f"**Uvanlig lav vannføring** – Q = {q_val:.0f} m³/s ligger på "
-            f"{_pct_q:.0f}. persentil av juli–august-klimatologien. Transporttiden "
-            f"til Fetsund er {t_fetsund} t mot ~{_t_norm:.0f} t i et normalår. "
-            "Praktisk konsekvens: vannet som ankommer målet er allerede i Vorma "
-            "nesten to døgn i forveien, så observasjon ved Svanefoss er en bedre "
-            "kilde enn vindvarselet de siste dagene før stevnet.",
-            icon="🐢",
+    # ── Uttynning ved samløpet – beregnet, ikke konstant ─────────────────────
+    kappa_now, f_now, kappa_src = dilution_kappa(ertesekken_q, funnefoss_q,
+                                                 mode='episode')
+    k1, k2, k3 = st.columns(3)
+    k1.metric(
+        "Uttynning κ nå", f"{kappa_now:.2f}",
+        delta=("beregnet fra vannføring" if "historisk" not in kappa_src
+               else "historisk median"),
+        delta_color="off",
+        help=("κ er Vormas blandingsandel i samløpet: "
+              "κ = Q_Vorma / (Q_Vorma + Q_Glomma). "
+              f"Nå: {kappa_src}. Historisk median jul–aug er 0,633 – praktisk "
+              "talt identisk med den empiriske episode-κ = 0,63 fra 35 kalde "
+              "episoder, som bekrefter tolkningen."),
+    )
+    _qg_txt = (f"{funnefoss_q.iloc[-1]['value']:.0f} m³/s"
+               if not funnefoss_q.empty else "N/A")
+    k2.metric("Vannføring Vorma (Ertesekken)", f"{q_val:.0f} m³/s")
+    k3.metric("Vannføring Glomma (Funnefoss)", _qg_txt,
+              delta=None if not funnefoss_q.empty else "⚠️ mangler – bruker median κ",
+              delta_color="off")
+    if f_now < 0.50:
+        st.warning(
+            f"**Glomma dominerer samløpet akkurat nå** (Vorma-andel {f_now:.0%}, "
+            "normalt 63 %). En kaldpuls fra Mjøsa blir kraftigere fortynnet enn "
+            "vanlig før den når Fløter'n, og prediksjonen er tilsvarende dempet.",
+            icon="💧",
         )
 
     # ── Seiche-ettereffekt banner ─────────────────────────────────────────────
@@ -841,13 +921,10 @@ def page_prediksjon():
     # I så fall er en ny (tredje) kalddipp i samme periode lite sannsynlig, og
     # varselet nedgraderes til en info om at oppgangen forventes å forplante
     # seg nedstrøms til Fløter'n/Fetsund.
-    # detect_seiche_risk() bruker nå stigende/gjenopprettet Vorma som PRIMÆRPORT
-    # (seiche['oscillating']), ikke som etterhåndsnedgradering. vorma_rising
-    # beholdes for tekstvalget under.
     vorma_rising = (len(primary_df) >= 24 and
                      (latest_val - primary_df.iloc[-24]['value']) > 0.2)
 
-    if seiche.get('episode_date') is not None and not seiche.get('oscillating', True):
+    if seiche['active'] and vorma_rising:
         ep_date_oslo = seiche['episode_date'].tz_convert(
             'Europe/Oslo').strftime('%-d. %b kl %H:%M')
         st.info(
@@ -864,63 +941,40 @@ def page_prediksjon():
         ep_date_oslo = seiche['episode_date'].tz_convert(
             'Europe/Oslo').strftime('%-d. %b kl %H:%M')
         days_rem = seiche['days_remaining']
-        st.info(
+        st.warning(
             f"**Seiche-ettereffekt aktiv** – forhøyet risiko for sekundær kaldpuls\n\n"
             f"En bekreftet kald episode ble registrert ved Minnesund for "
             f"**{seiche['days_ago']:.1f} dager siden** "
             f"({ep_date_oslo}, min {seiche['episode_min_T']:.1f} °C, "
             f"ΔT = {seiche['episode_dT']:.1f} °C). "
-            f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls. "
-            f"Vinduet løper ca. **{days_rem:.0f} dager til**.\n\n"
-            f"*Om styrken på dette signalet:* intervallene mellom påfølgende "
-            f"kuldeepisoder (n = 58, 2015–2025) har median 11,5 dager og kvartiler "
-            f"8–15. 5–12-dagersvinduet fanger 57 % av alle intervaller, men er "
-            f"8 dager bredt mot en median syklus på 11,5 – det diskriminerer derfor "
-            f"svakt, og den betingede risikoen er flat gjennom vinduet framfor "
-            f"avtagende. Filtrert til episoder uten nytt vindpådriv står bare "
-            f"n = 6 igjen. Behandle dette som en påminnelse, ikke som et varsel.\n\n",
+            f"Sprangsjiktet i Mjøsa kan oscillere tilbake og gi en ny kaldpuls – "
+            f"typisk opptrer sekundærdroppen 5–12 dager etter primær bunn. "
+            f"**Forhøyet risikovindu varer i ca. {days_rem:.0f} dager til.**\n\n",
             icon="🌊",
         )
 
 
-    # ── Observasjonsdrevet modus ────────────────────────────────────────────
-    # Når transporttiden er lengre enn tiden fram til arrangementet, er vannet
-    # som ankommer målet allerede i Vorma. Prediksjonen er da en observasjon med
-    # etterslep, ikke en prognose, og usikkerheten faller til MODEL_SIGMA_DATA.
-    _event_dt = calculate_event_date(EVENT_YEAR)
-    _hours_to_event = (_event_dt - pd.Timestamp.now(tz='UTC')).total_seconds() / 3600
-    if 0 < _hours_to_event <= t_fetsund and not primary_df.empty:
-        _fe_base = (fetsund_temp['value'].tail(48).median()
-                    if not fetsund_temp.empty else latest_val + 1.5)
-        _sv_base = primary_df['value'].tail(48).median()
-        st.success(
-            f"**Observasjonsdrevet modus** – vannet som ankommer målet er allerede i Vorma\n\n"
-            f"Transporttid til Fetsund er **{t_fetsund} t**, og det er "
-            f"**{_hours_to_event:.0f} t** til start. Prediksjonen for stevnedagen "
-            f"hviler nå på målinger, ikke på vindvarsel. Usikkerheten er tilsvarende "
-            f"redusert til ±{MODEL_SIGMA_DATA:.1f} °C (1σ).",
-            icon="🎯",
-        )
-        _rows = []
-        for _sv in [_sv_base + 2, _sv_base, _sv_base - 2, _sv_base - 4,
-                    _sv_base - 6, _sv_base - 8]:
-            _rows.append({
-                'Svanefoss nå': f"{_sv:.1f} °C",
-                f'→ Fetsund om {t_fetsund} t':
-                    f"{_fe_base + (_sv - _sv_base) * TEMPERATURE_SURVIVAL:.1f} °C",
-            })
-        with st.expander("Oppslagstabell: Svanefoss nå → Fetsund på stevnedagen", expanded=False):
-            st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
-            st.caption(
-                f"T_Fetsund = {_fe_base:.1f} + (T_Svanefoss − {_sv_base:.1f}) × "
-                f"{TEMPERATURE_SURVIVAL:.2f}. Baselinjer er 48-timers medianer. "
-                "Bruk denne til beslutning i stedet for E-kurven når modusen er aktiv."
-            )
-
     # ── Bygg prognose tidlig så den er tilgjengelig i hele seksjonen ─────────
     energy_df   = build_wind_energy_series(frost_vind, weather_mjosa)
     forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q,
+                                         glomma_q_df=funnefoss_q,
                                          energy_df=energy_df)
+    _mode = forecast_df['mode'].iloc[0] if not forecast_df.empty else None
+    if _mode == 'level' and FORECAST_MODE == 'increment':
+        st.info(
+            "Prognosen kjører i **nivåmodus** (reservemodell) fordi Fetsund-"
+            "målingene mangler eller er eldre enn 24 t. Nivåformen har høyere "
+            "forventet feil (MAE ≈ 0,84 mot 0,54 °C) – tolk båndet med tilsvarende "
+            "forsiktighet.",
+            icon="ℹ️",
+        )
+    if energy_df is None or energy_df.empty:
+        st.warning(
+            "**Vinddata er utilgjengelig** (Frost API / Met.no svarte ikke). "
+            "Prognosen under er IKKE vindjustert, og oppvellingsrisiko kan ikke "
+            "vurderes. Kun transportmodellen vises.",
+            icon="🌬️",
+        )
     t_flotern_h, travel_h_now, _, _ = calculate_travel_time(ertesekken_q)
 
     # ── Prediksjon for 1-4 dager ───────────────────────────────────────────────
@@ -928,9 +982,11 @@ def page_prediksjon():
     st.subheader("Dagsprognose")
     st.caption(
         f"Frem til datahorisonten (+{travel_h_now:.0f} t) er prediksjonen basert på "
-        f"**observert vann i Vorma** og er relativt pålitelig (σ ≈ {MODEL_SIGMA_DATA} °C). "
-        f"Etter det er den ekstrapolering – kun vindenergi-signalet (E) gir "
-        f"reell fremoverskuende informasjon (AUC = 0,87 for ΔT < −3 °C)."
+        "**observert vann i Vorma**, og predikerer endringen fra dagens Fetsund-måling: "
+        "ΔT_Fetsund = κ · ΔT_Vorma, der κ beregnes fra sist målte vannføring "
+        f"(nå {kappa_now:.2f}). Validert MAE 0,54 °C. "
+        "Etter datahorisonten er det ekstrapolering – kun vindenergi-signalet (E) gir "
+        "reell fremoverskuende informasjon (AUC = 0,87 for ΔT < −3 °C)."
     )
 
     _now_oslo = pd.Timestamp.now(tz='UTC').tz_convert('Europe/Oslo')
@@ -978,8 +1034,14 @@ def page_prediksjon():
                 # Innenfor datahorisonten: vis lav, pålitelig usikkerhet
                 delta_str  = f"{lo68:.1f}–{hi68:.1f} °C  ✅ databasert"
                 delta_col  = "off"
-                help_str   = (f"Basert på observert vann i Vorma – "
-                              f"σ ≈ {MODEL_SIGMA_DATA} °C (validert MAE ~0,5–0,6 °C)")
+                _sig = row.get('sigma')
+                _dv  = row.get('delta_vorma')
+                help_str   = (
+                    "Basert på observert vann i Vorma (inkrementform, validert "
+                    "MAE 0,54 °C)."
+                    + (f" ΔT_Vorma under transport = {_dv:+.1f} °C." if pd.notna(_dv) else "")
+                    + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
+                )
             else:
                 emoji      = _RISK_EMOJI.get(risk, "⚪")
                 # Samme NaN-fiks som over: pd.notna() istedenfor "e_fc and ..."
@@ -987,9 +1049,13 @@ def page_prediksjon():
                 delta_str  = f"{lo68:.1f}–{hi68:.1f} °C  {emoji} {risk}{e_str}"
                 delta_col  = ("inverse"
                               if risk in ("advarsel", "alarm") else "off")
-                help_str   = (f"Ekstrapolering fra nå-tilstand med eksponentielt avtagende "
-                              f"anomali. Vindrisiko-nivå basert på prognosert SE/S-vindenergi "
-                              f"fra Met.no (AUC = 0,87 for ΔT < −3 °C).")
+                _sig = row.get('sigma')
+                help_str   = (
+                    "Ekstrapolering: Vorma-anomalien relakserer mot 72-timers medianen "
+                    f"(e-foldingstid {VORMA_RELAX_HOURS} t). Vindrisiko-nivå fra prognosert "
+                    "SE/S-vindenergi (Met.no, AUC = 0,87 for ΔT < −3 °C)."
+                    + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
+                )
 
             fcols[i].metric(
                 label, f"{pred:.1f} °C",
@@ -1006,18 +1072,48 @@ def page_prediksjon():
     st.subheader("Temperaturprognose – Fløter'n / Fetsund")
 
     if not forecast_df.empty:
-        fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now)
+        # Tidligere prediksjoner fra loggen, tegnet stiplet ved siden av fasit
+        pred_log = read_prediction_log()
+        hist_h   = 24
+        hist_df  = pd.DataFrame()
+        if not pred_log.empty:
+            hcol1, _ = st.columns([1, 3])
+            hist_h = hcol1.selectbox(
+                "Vis tidligere prediksjon med varsel",
+                options=list(EVAL_HORIZONS), index=0,
+                format_func=lambda h: f"{h} timer i forveien",
+                help=("Stiplet oransje linje viser hva modellen predikerte for hvert "
+                      "tidspunkt, gitt så mange timer i forveien. Avstanden til den "
+                      "heltrukne blå observasjonslinjen er treffsikkerheten."),
+            )
+            hist_df = prediction_history_series(pred_log, hist_h)
+
+        fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now,
+                                 history_df=hist_df, history_horizon=hist_h)
         st.plotly_chart(fig_fc, use_container_width=True, config={"responsive": True})
+        if pred_log.empty:
+            st.caption(
+                "Prediksjonsloggen er tom eller utilgjengelig, så tidligere "
+                "prediksjoner kan ikke vises. Loggen fylles av GitHub Actions-"
+                "jobben kl. 06:00 UTC."
+            )
+        _sig_max = forecast_df['sigma'].max() if 'sigma' in forecast_df.columns else None
         st.caption(
             "Solid linje: observert (Fetsund) · stiplet linje: prediksjon · "
-            f"grått bånd: 68 % KI · lyst bånd: 95 % KI. "
+            "mørkt bånd: 68 % sannsynlig område · lyst bånd: 95 %. "
+            "Båndene er **risikojusterte**, ikke symmetriske konfidensintervaller: "
+            "nedre grense kan skjeves ned av vindvarselet uten at midtestimatet flyttes. "
             f"**Frem til datahorisonten (+{travel_h_now:.0f} t)** er prediksjonen basert på "
-            f"observert vann i Vorma og har lav usikkerhet (σ ≈ {MODEL_SIGMA_DATA} °C). "
-            f"**Etter datahorisonten** ekstrapoleres anomalien eksponentielt og usikkerheten "
-            f"vokser mot σ ≈ {MODEL_SIGMA} °C og videre. "
-            f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS} t) vil båndet "
-            "skjeves nedover og utvides dersom SE/S-vindvarselet overskrider "
-            f"advarsel- ({ENERGY_WARN:.0f} m·h) eller alarmterskelen ({ENERGY_THRESHOLD:.0f} m·h)."
+            "observert vann i Vorma. Bredden følger hvor stor temperaturendring som er "
+            f"under transport (σ = √({SIGMA_BASE}² + ({SIGMA_PER_DELTA}·|ΔT_Vorma|)²)) – "
+            "den er smal i rolige perioder og utvides automatisk når en kraftig kaldpuls "
+            "er på vei. **Etter datahorisonten** ekstrapoleres anomalien mot 72-timers "
+            f"medianen, og usikkerheten metter mot σ ≈ {MODEL_SIGMA_ASYMPTOTE} °C "
+            f"(kalibrert mot persistensfeilen ved Fetsund)"
+            + (f"; maks i denne prognosen er σ = {_sig_max:.1f} °C. " if _sig_max else ". ")
+            + f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS} t) skjeves båndet "
+            "nedover dersom SE/S-vindvarselet overskrider advarsel- "
+            f"({ENERGY_WARN:.0f} m·h) eller alarmterskelen ({ENERGY_THRESHOLD:.0f} m·h)."
         )
     else:
         st.warning("Ikke nok data for prognosevisning.")
@@ -1033,54 +1129,20 @@ def page_prediksjon():
             fc_e   = energy_df[ energy_df['is_forecast']]
             cur_E  = float(obs_e['E'].iloc[-1]) if not obs_e.empty else 0.0
             pct    = round(cur_E / ENERGY_THRESHOLD * 100)
-
-            # Badgen leste tidligere maks over hele horisonten, men var merket
-            # "dag +5". Nå vises maks EKSPLISITT med datoen den inntreffer, slik
-            # at en topp langt utenfor beslutningsvinduet er synlig som sådan.
-            if not fc_e.empty:
-                i_max  = fc_e['E'].idxmax()
-                fc_Emax = float(fc_e.loc[i_max, 'E'])
-                fc_tmax = pd.to_datetime(fc_e.loc[i_max, 'time']).tz_convert('Europe/Oslo')
-                fc_Ehi  = float(fc_e['E_upper'].max())
-                tmax_txt = fc_tmax.strftime('%-d. %b')
-            else:
-                fc_Emax, fc_Ehi, tmax_txt = cur_E, cur_E, "–"
+            fc_E   = float(fc_e['E'].iloc[-1])       if not fc_e.empty else cur_E
+            fc_Ehi = float(fc_e['E_upper'].max())    if not fc_e.empty else cur_E
 
             c1.metric("Kumulativ E nå",   f"{cur_E:.1f} m·h",
-                      help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet. "
-                           f"Kalibreringsenhet (Σv delt på {ENERGY_CALIB_DT_HOURS:.0f}) – "
-                           "direkte sammenlignbar med tersklene.")
+                      help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet")
             c2.metric("Andel av terskel", f"{pct} %",
                       help=f"{ENERGY_THRESHOLD:.0f} m·h = 100 % (AUC = 0.86)")
-            c3.metric(f"Maks prognosert E ({tmax_txt})", f"{fc_Emax:.1f} m·h",
-                      delta=("⚠️ Over terskel" if fc_Emax >= ENERGY_THRESHOLD else
-                             "Over advarsel"   if fc_Emax >= ENERGY_WARN else None),
-                      delta_color="inverse" if fc_Emax >= ENERGY_WARN else "normal",
-                      help="Høyeste E i hele varselhorisonten, med dato. "
-                           "Sjekk om datoen ligger innenfor beslutningsvinduet "
-                           "før den tolkes som risiko for stevnedagen.")
-
-            # ── Konsistensvakt ─────────────────────────────────────────────
-            # Hvis dagtabellen sier grønt (ingen SE/S-timer) samme dag som
-            # E-kurven sier over advarselsterskel, er det en datafeil – ikke en
-            # risiko. Vis det som datakvalitetsvarsel, ikke som alarm.
-            if fc_Emax >= ENERGY_WARN and not weather_mjosa.empty:
-                _wm = weather_mjosa.copy()
-                _wm['dt_local'] = pd.to_datetime(_wm['time']).dt.tz_convert('Europe/Oslo')
-                _same_day = _wm[_wm['dt_local'].dt.date == fc_tmax.date()]
-                _ses_hours = int((_same_day['southerly_wind'] > 0).sum()) if not _same_day.empty else 0
-                if _ses_hours == 0:
-                    st.warning(
-                        f"**Datakvalitet:** E-kurven topper på {fc_Emax:.0f} m·h den "
-                        f"{tmax_txt}, men vindvarselet har **null timer** i SE/S-sektoren "
-                        f"(135–225°) det døgnet. De to kildene er inkonsistente – "
-                        "behandle E-toppen som usikker inntil den er verifisert.",
-                        icon="🔍",
-                    )
+            c3.metric("Prognosert E (dag +5)", f"{fc_E:.1f} m·h",
+                      delta="⚠️ Kan overskride terskel!" if fc_Ehi >= ENERGY_THRESHOLD else None,
+                      delta_color="inverse" if fc_Ehi >= ENERGY_THRESHOLD else "normal")
         else:
             c1.metric("Kumulativ E nå", "N/A")
             c2.metric("Andel av terskel", "N/A")
-            c3.metric("Maks prognosert E", "N/A")
+            c3.metric("Prognosert E (dag +5)", "N/A")
 
         if not weather_mjosa.empty:
             avg_ses = weather_mjosa.head(48)['southerly_wind'].mean()
@@ -1093,17 +1155,7 @@ def page_prediksjon():
         wind_tabs = st.tabs(["Kumulativ oppvellingsrisiko", "Vindretning og -hastighet"])
         with wind_tabs[0]:
             if not energy_df.empty:
-                _q_now = calculate_travel_time(ertesekken_q)[2]
-                _dw = decision_window(calculate_event_date(EVENT_YEAR), _q_now)
-                fig_e = _wind_energy_chart(energy_df, decision_win=_dw)
-                st.caption(
-                    f"🟩 Grønt felt: vindpådrivet som påvirker stevnedagen – "
-                    f"{_dw[0].tz_convert('Europe/Oslo').strftime('%-d. %b %H:%M')} til "
-                    f"{_dw[1].tz_convert('Europe/Oslo').strftime('%-d. %b %H:%M')} "
-                    f"(samlet etterslep {_dw[2]:.0f} t ved Q = {_q_now:.0f} m³/s). "
-                    "E-topper utenfor dette feltet påvirker vann som ankommer målet "
-                    "før eller etter arrangementet."
-                )
+                fig_e = _wind_energy_chart(energy_df)
                 if fig_e:
                     st.plotly_chart(fig_e, use_container_width=True, config={"responsive": True})
                 st.caption(
@@ -1207,8 +1259,19 @@ def page_data_varsel():
         }, "Vannføring – siste 7 dager")
         st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
 
+        _f, _fsrc = mixing_fraction(er_q, fn_q)
+        st.caption(
+            f"**Blandingsandel i samløpet: f = {_f:.3f}** ({_fsrc}). "
+            "Dette tallet ER uttynningskoeffisienten κ i prediksjonsmodellen – "
+            "andelen av vannet ved Fløter'n/Fetsund som kommer fra Vorma, og dermed "
+            "hvor mye av en kaldpuls fra Mjøsa som overlever samløpet. "
+            "Historisk median juli–august er 0,633. Massebalansen stemmer: "
+            "median (Q_Ertesekken + Q_Funnefoss) / Q_Blaker = 1,03 over 2015–2025."
+        )
+
         st.subheader("Transporttid-kalkulator")
-        q_now = er_q.iloc[-1]['value'] if not er_q.empty else FALLBACK_DISCHARGE
+        q_now, _ = safe_discharge(er_q, FALLBACK_DISCHARGE)
+        q_now = min(max(q_now, 100), 1200)
         q_val = st.slider("Vannføring ved Ertesekken (m³/s)",
                           min_value=100, max_value=1200,
                           value=int(q_now), step=10)
@@ -1299,6 +1362,247 @@ def page_data_varsel():
 
 
 # ============================================================================
+# PAGE: TREFFSIKKERHET
+# Etterprøver den loggede prediksjonen mot faktisk observert temperatur ved
+# Fetsund. Dette er grunnlaget for å kalibrere SIGMA_BASE / SIGMA_PER_DELTA mot
+# ekte residualer i stedet for mot historiske rekonstruksjoner.
+# ============================================================================
+
+def page_treffsikkerhet():
+    st.title("Treffsikkerhet")
+    st.markdown(
+        "Hver morgen logges prediksjonen for 24, 48, 72 og 96 timer frem. Her "
+        "sammenlignes hver av dem med temperaturen som faktisk ble målt ved "
+        "Fetsund på gyldighetstidspunktet."
+    )
+
+    with st.spinner("Henter logg og observasjoner…"):
+        log = read_prediction_log()
+        # Hent Fetsund-observasjoner så langt tilbake som loggen rekker
+        hours_back = 720
+        if not log.empty and 'logged_at' in log.columns:
+            _t0 = pd.to_datetime(log['logged_at'], errors='coerce', utc=True).min()
+            if pd.notna(_t0):
+                span = (pd.Timestamp.now(tz='UTC') - _t0).total_seconds() / 3600
+                hours_back = int(min(max(span + 168, 336), 2160))  # 14 d–90 d
+        fetsund_obs = fetch_nve_data(STATION_FETSUND, 1003, hours_back=hours_back)
+
+    if log.empty:
+        st.info(
+            "**Loggen er tom eller utilgjengelig ennå.**\n\n"
+            "Radene skrives av GitHub Actions-jobben `log_prediction.py` "
+            "kl. 06:00 UTC hver dag. Siden fylles automatisk etter hvert som "
+            "prediksjoner rekker å bli innhentet av virkeligheten – de første "
+            "tallene for 24-timers horisonten kommer etter to døgn, og for "
+            "96-timers horisonten etter fem.",
+            icon="🗓️",
+        )
+        return
+
+    if fetsund_obs.empty:
+        st.error("Ingen Fetsund-observasjoner tilgjengelig – kan ikke etterprøve.")
+        return
+
+    ev = evaluate_prediction_log(log, fetsund_obs)
+    if ev.empty:
+        _n = len(log)
+        st.info(
+            f"Loggen har {_n} rad(er), men ingen av prediksjonene har rukket å "
+            "bli innhentet av en tilsvarende observasjon ennå. Prøv igjen om "
+            "noen døgn.",
+            icon="⏳",
+        )
+        return
+
+    summary = summarize_prediction_skill(ev)
+
+    # ── Nøkkeltall ───────────────────────────────────────────────────────────
+    st.header("Nøkkeltall")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Etterprøvde prediksjoner", f"{len(ev)}",
+              help=f"Fra {ev['logged_at'].min():%d.%m.%Y} til {ev['logged_at'].max():%d.%m.%Y}")
+    c2.metric("Samlet MAE", f"{ev['abs_error'].mean():.2f} °C",
+              help="Gjennomsnittlig absoluttavvik over alle horisonter")
+    _bias = ev['error'].mean()
+    c3.metric("Systematisk skjevhet", f"{_bias:+.2f} °C",
+              delta=("modellen predikerer for varmt" if _bias > 0.3 else
+                     "modellen predikerer for kaldt" if _bias < -0.3 else
+                     "ingen vesentlig skjevhet"),
+              delta_color="off",
+              help="Positiv verdi = prediksjonen ligger over observasjonen")
+    _c68 = ev['in68'].dropna()
+    c4.metric("Dekning i 68 %-båndet",
+              f"{100 * _c68.mean():.0f} %" if len(_c68) else "N/A",
+              delta="mål: 68 %", delta_color="off")
+
+    # ── Per horisont ─────────────────────────────────────────────────────────
+    st.divider()
+    st.header("Per prognosehorisont")
+
+    disp = summary.copy()
+    disp['Horisont']     = disp['horizon_h'].map(lambda h: f"+{h} t")
+    disp['n']            = disp['n']
+    disp['MAE']          = disp['mae'].map(lambda v: f"{v:.2f} °C")
+    disp['Skjevhet']     = disp['bias'].map(lambda v: f"{v:+.2f} °C")
+    disp['RMSE']         = disp['rmse'].map(lambda v: f"{v:.2f} °C")
+    disp['P90 avvik']    = disp['p90_abs'].map(lambda v: f"{v:.2f} °C")
+    disp['Dekning 68 %'] = disp['coverage68'].map(
+        lambda v: f"{100 * v:.0f} %" if pd.notna(v) else "–")
+    disp['Dekning 95 %'] = disp['coverage95'].map(
+        lambda v: f"{100 * v:.0f} %" if pd.notna(v) else "–")
+    disp['σ oppgitt']    = disp['sigma_mean'].map(
+        lambda v: f"{v:.2f} °C" if pd.notna(v) else "–")
+    disp['σ faktisk']    = disp['sigma_implied'].map(
+        lambda v: f"{v:.2f} °C" if pd.notna(v) else "–")
+    st.dataframe(
+        disp[['Horisont', 'n', 'MAE', 'Skjevhet', 'RMSE', 'P90 avvik',
+              'Dekning 68 %', 'Dekning 95 %', 'σ oppgitt', 'σ faktisk']],
+        hide_index=True, use_container_width=True,
+    )
+
+    st.caption(
+        "**σ oppgitt** er usikkerheten modellen selv anga; **σ faktisk** er "
+        "standardavviket til de virkelige residualene. Er σ faktisk vesentlig "
+        "større enn σ oppgitt, er båndene for smale, og `SIGMA_BASE` / "
+        "`SIGMA_PER_DELTA` i glommadyppen_core.py bør økes tilsvarende – og "
+        "omvendt. Dekningstallene bør nærme seg 68 % og 95 % når antallet "
+        "observasjoner blir stort nok; med under ~30 punkter per horisont er "
+        "de fortsatt svært usikre."
+    )
+
+    # ── MAE-graf ─────────────────────────────────────────────────────────────
+    if len(summary) > 0:
+        fig_mae = go.Figure()
+        fig_mae.add_trace(go.Bar(
+            x=[f"+{h} t" for h in summary['horizon_h']], y=summary['mae'],
+            name='MAE', marker_color='#185FA5',
+            hovertemplate='<b>MAE</b>: %{y:.2f} °C<extra></extra>',
+        ))
+        fig_mae.add_trace(go.Bar(
+            x=[f"+{h} t" for h in summary['horizon_h']], y=summary['sigma_implied'],
+            name='σ faktisk', marker_color='rgba(186,117,23,0.75)',
+            hovertemplate='<b>σ faktisk</b>: %{y:.2f} °C<extra></extra>',
+        ))
+        fig_mae.add_trace(go.Scatter(
+            x=[f"+{h} t" for h in summary['horizon_h']], y=summary['sigma_mean'],
+            mode='lines+markers', name='σ oppgitt av modellen',
+            line=dict(color='#6B0000', width=2, dash='dot'),
+            hovertemplate='<b>σ oppgitt</b>: %{y:.2f} °C<extra></extra>',
+        ))
+        fig_mae.update_layout(
+            title="Feil og usikkerhet per horisont", barmode='group',
+            yaxis=dict(title='°C'), height=380, template='plotly_white',
+            margin=dict(l=50, r=30, t=50, b=40), hovermode='x unified',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                        xanchor='center', x=0.5, font=dict(size=10)),
+        )
+        st.plotly_chart(fig_mae, use_container_width=True,
+                        config={"responsive": True})
+
+    # ── Predikert mot observert ──────────────────────────────────────────────
+    st.divider()
+    st.header("Predikert mot observert")
+
+    sel_h = st.selectbox(
+        "Horisont", options=sorted(ev['horizon_h'].unique()),
+        format_func=lambda h: f"{h} timer i forveien",
+    )
+    sub = ev[ev['horizon_h'] == sel_h].sort_values('valid_time')
+
+    if sub.empty:
+        st.info("Ingen etterprøvde prediksjoner på denne horisonten ennå.")
+        return
+
+    fig_ts = go.Figure()
+    if sub['lower68'].notna().any() and sub['upper68'].notna().any():
+        band = sub.dropna(subset=['lower68', 'upper68'])
+        fig_ts.add_trace(go.Scatter(
+            x=list(band['valid_time']) + list(band['valid_time'])[::-1],
+            y=list(band['upper68']) + list(band['lower68'])[::-1],
+            fill='toself', fillcolor='rgba(186,117,23,0.16)',
+            line=dict(color='rgba(0,0,0,0)'), name='68 % område',
+            hoverinfo='skip',
+        ))
+    fig_ts.add_trace(go.Scatter(
+        x=sub['valid_time'], y=sub['predicted'], mode='lines+markers',
+        name=f'Predikert {sel_h} t i forveien',
+        line=dict(color='#BA7517', width=1.8, dash='dash'),
+        marker=dict(size=5),
+        hovertemplate='<b>Predikert</b>: %{y:.1f} °C<extra></extra>',
+    ))
+    fig_ts.add_trace(go.Scatter(
+        x=sub['valid_time'], y=sub['observed'], mode='lines',
+        name='Observert (Fetsund)', line=dict(color='#185FA5', width=2.2),
+        hovertemplate='<b>Observert</b>: %{y:.1f} °C<extra></extra>',
+    ))
+    fig_ts.update_layout(
+        title=f"Prediksjon {sel_h} t i forveien mot fasit",
+        yaxis=dict(title='°C'), xaxis_title='', height=400,
+        template='plotly_white', hovermode='x unified',
+        margin=dict(l=50, r=30, t=50, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                    xanchor='center', x=0.5, font=dict(size=10)),
+    )
+    st.plotly_chart(fig_ts, use_container_width=True, config={"responsive": True})
+
+    # ── Feilfordeling ────────────────────────────────────────────────────────
+    fig_err = go.Figure()
+    fig_err.add_trace(go.Scatter(
+        x=sub['valid_time'], y=sub['error'], mode='markers',
+        marker=dict(size=7, color=sub['error'], colorscale='RdBu',
+                    cmid=0, cmin=-3, cmax=3, showscale=False),
+        name='Avvik', hovertemplate='<b>Avvik</b>: %{y:+.2f} °C<extra></extra>',
+    ))
+    fig_err.add_hline(y=0, line_color='rgba(80,80,80,0.6)', line_width=1)
+    _mb = sub['error'].mean()
+    fig_err.add_hline(y=_mb, line_dash='dot', line_color='#BA7517',
+                      annotation_text=f"snitt {_mb:+.2f} °C",
+                      annotation_position='top left', annotation_font_size=10)
+    fig_err.update_layout(
+        title=f"Avvik over tid (+{sel_h} t) – positiv = predikert for varmt",
+        yaxis=dict(title='°C'), xaxis_title='', height=300,
+        template='plotly_white', margin=dict(l=50, r=30, t=50, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_err, use_container_width=True, config={"responsive": True})
+
+    # ── Treff fordelt på vindrisikonivå ──────────────────────────────────────
+    if 'windrisk' in sub.columns and sub['windrisk'].notna().any():
+        grp = (sub.dropna(subset=['windrisk'])
+                  .groupby('windrisk')['abs_error']
+                  .agg(['count', 'mean']).reset_index())
+        grp = grp[grp['count'] >= 3]
+        if not grp.empty:
+            st.subheader("Treffsikkerhet fordelt på vindrisikonivå")
+            grp['Nivå'] = grp['windrisk']
+            grp['Antall'] = grp['count']
+            grp['MAE'] = grp['mean'].map(lambda v: f"{v:.2f} °C")
+            st.dataframe(grp[['Nivå', 'Antall', 'MAE']], hide_index=True,
+                         use_container_width=True)
+            st.caption(
+                "Er MAE vesentlig høyere på «advarsel» og «alarm» enn på «lav», "
+                "bekrefter det at vindsituasjonene er de vanskelige – og at "
+                "sigma-multiplikatorene WIND_SIGMA_MULT_WARN / _ALARM gjør en "
+                "reell jobb."
+            )
+
+    with st.expander("Alle etterprøvde prediksjoner (rådata)"):
+        raw = ev.copy().sort_values(['valid_time', 'horizon_h'], ascending=[False, True])
+        raw['logged_at']  = raw['logged_at'].dt.tz_convert('Europe/Oslo').dt.strftime('%d.%m %H:%M')
+        raw['valid_time'] = raw['valid_time'].dt.tz_convert('Europe/Oslo').dt.strftime('%d.%m %H:%M')
+        st.dataframe(
+            raw[['logged_at', 'horizon_h', 'valid_time', 'predicted',
+                 'observed', 'error', 'lower68', 'upper68', 'in68', 'windrisk']]
+            .round(2),
+            hide_index=True, use_container_width=True,
+        )
+        st.download_button(
+            "Last ned som CSV", ev.to_csv(index=False).encode('utf-8'),
+            file_name="glommadyppen_treffsikkerhet.csv", mime="text/csv",
+        )
+
+
+# ============================================================================
 # MAIN – navigasjon
 # ============================================================================
 
@@ -1312,18 +1616,25 @@ def main():
         unsafe_allow_html=True,
     )
     with st.sidebar:
-        st.markdown(
-            '<a href="https://glommadyppen.no" target="_blank">'
-            + '<img src="data:image/jpeg;base64,{}" style="width:100%;cursor:pointer;">'
-            .format(__import__('base64').b64encode(
-                open('Samensatt_logo_GlommDyppen.jpg', 'rb').read()).decode())
-            + '</a>',
-            unsafe_allow_html=True
-        )
+        # Logoen leses fra disk. Mangler filen (eller er repoet sjekket ut uten
+        # den), skal det IKKE ta ned hele appen - da vises bare en tekstlenke.
+        try:
+            _logo_b64 = __import__('base64').b64encode(
+                open('Samensatt_logo_GlommDyppen.jpg', 'rb').read()).decode()
+            st.markdown(
+                '<a href="https://glommadyppen.no" target="_blank">'
+                + f'<img src="data:image/jpeg;base64,{_logo_b64}" '
+                  'style="width:100%;cursor:pointer;">'
+                + '</a>',
+                unsafe_allow_html=True
+            )
+        except OSError:
+            st.markdown("### [GlommaDyppen](https://glommadyppen.no)")
         st.markdown("---")
         page = st.radio(
             "Navigasjon",
-            options=["Om siden", "Observasjoner og værvarsel", "Dipp Prediksjon"],
+            options=["Om siden", "Observasjoner og værvarsel", "Dipp Prediksjon",
+                     "Treffsikkerhet"],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -1331,7 +1642,8 @@ def main():
         **Modell**
         - Fløter'n (start): t = 7670 / Q
         - Fetsund (mål): t = 9700 / Q
-        - Vorma-anomali respons: 63 %
+        - Inkrementform, MAE 0,54 °C
+        - κ = Q_Vorma/(Q_Vorma+Q_Glomma), beregnet
         - Validert 2018–2025 (AUC = 0,87)
         - Ettereffekt: dag 5–12 etter vindepisode
 
@@ -1364,6 +1676,8 @@ def main():
         page_informasjon()
     elif page == "Observasjoner og værvarsel":
         page_data_varsel()
+    elif page == "Treffsikkerhet":
+        page_treffsikkerhet()
     else:
         page_prediksjon()
 
