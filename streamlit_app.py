@@ -18,7 +18,45 @@ from plotly.subplots import make_subplots
 # log_prediction.py (GitHub Actions-cronjobb) for å garantere at appen og
 # loggingen alltid kjører nøyaktig samme modellogikk. Se glommadyppen_core.py.
 import glommadyppen_core as _core
-from glommadyppen_core import *  # noqa: F401,F403 - konstanter + modellfunksjoner
+
+
+def _reload_core_if_stale():
+    """
+    Laster glommadyppen_core.py på nytt hvis modulen i minnet er eldre enn
+    filen på disk.
+
+    Streamlit Cloud kjører skriptet på nytt ved hver interaksjon, men i SAMME
+    Python-prosess. Modulen ligger da allerede i sys.modules, og `import` gjør
+    ingenting - selv etter at en ny fil er rullet ut. Resultatet er en app som
+    kjører ny streamlit_app.py mot gammel kjernekode, uten at noe i filsystemet
+    avslører det: filen på disk er riktig, men objektet i minnet er ikke.
+
+    Vi sammenligner derfor CORE_VERSION i den lastede modulen mot strengen som
+    faktisk står i kildefilen, og kaller importlib.reload() ved avvik. Det
+    sparer en manuell «Reboot app» og fjerner en feilmelding som ellers ser
+    selvmotsigende ut.
+    """
+    import importlib, re
+    try:
+        path = _core.__file__
+        with open(path, encoding='utf-8') as fh:
+            src = fh.read(4000)          # CORE_VERSION står øverst i filen
+        m = re.search(r'^CORE_VERSION\s*=\s*["\']([^"\']+)["\']', src, re.M)
+        if not m:
+            return None
+        on_disk = m.group(1)
+        in_memory = getattr(_core, 'CORE_VERSION', None)
+        if on_disk != in_memory:
+            importlib.reload(_core)
+            return (in_memory, getattr(_core, 'CORE_VERSION', None))
+    except Exception:
+        return None
+    return None
+
+
+_CORE_RELOADED = _reload_core_if_stale()
+
+from glommadyppen_core import *  # noqa: F401,F403,E402 - konstanter + modellfunksjoner
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -101,6 +139,19 @@ def _check_core_version():
         f"`{found or 'ingen versjon (eldre enn 1.7.0)'}`.",
         icon="🔧",
     )
+
+    fp = _core_fingerprint()
+    on_disk = fp.get("CORE_VERSION", "")
+    if REQUIRED_CORE_VERSION in str(on_disk):
+        # Filen på disk ER riktig - problemet er en foreldet modul i minnet.
+        st.warning(
+            "Filen på disk har riktig versjon, men Python kjører fortsatt den "
+            "gamle koden fra minnet. Streamlit Cloud gjenbruker samme prosess "
+            "mellom kjøringer, så en ny fil blir ikke plukket opp av seg selv.\n\n"
+            "**Trykk «Manage app» nederst til høyre og velg «Reboot app».** "
+            "Da starter prosessen på nytt og feilen forsvinner.",
+            icon="♻️",
+        )
 
     st.markdown("**Dette er filen appen faktisk leste:**")
     st.code("\n".join(f"{k:14s} {v}" for k, v in _core_fingerprint().items()),
