@@ -32,7 +32,7 @@ import glommadyppen_core as core
 # Ark-ID og fanenavn er definert ETT sted (glommadyppen_core.py) slik at
 # skriving (her) og lesing (appen, via core.read_prediction_log) aldri kan
 # komme ut av synk.
-REQUIRED_CORE_VERSION = "1.8.0"
+REQUIRED_CORE_VERSION = "1.9.0"
 if getattr(core, "CORE_VERSION", None) != REQUIRED_CORE_VERSION:
     # Feil hardt og tidlig. Skriver vi til arket med en gammel kjerne, blir
     # loggen stille inkonsistent - noen rader med dynamisk κ, andre uten - og
