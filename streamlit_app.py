@@ -40,11 +40,11 @@ st.set_page_config(
 # melding om nøyaktig hva som er ute av synk.
 # ============================================================================
 
-REQUIRED_CORE_VERSION = "1.7.0"
+REQUIRED_CORE_VERSION = "1.8.0"
 
 _REQUIRED_CORE_ATTRS = [
     # v1.7 - dynamisk uttynning og robusthet
-    "CORE_VERSION", "dilution_kappa", "mixing_fraction", "safe_discharge",
+    "CORE_VERSION", "undisturbed_baseline", "relaxation_factor", "dilution_kappa", "mixing_fraction", "safe_discharge",
     "SEICHE_HISTORY_HOURS", "SIGMA_BASE", "SIGMA_PER_DELTA",
     "MODEL_SIGMA_ASYMPTOTE", "VORMA_RELAX_HOURS", "FORECAST_MODE",
     # v1.7 - etterprøving av prediksjonsloggen
@@ -107,7 +107,7 @@ def _check_core_version():
             language=None)
     st.markdown(
         "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
-        "`CORE_VERSION = \"1.7.0\"` på linje 30 og er cirka 1 280 linjer lang. "
+        "`CORE_VERSION = \"1.8.0\"` på linje 30 og er cirka 1 340 linjer lang. "
         "Ligger det flere kopier i repoet, er det stien over som gjelder."
     )
 
@@ -678,6 +678,16 @@ def _forecast_chart(fetsund_obs_df, forecast_df, travel_hours,
             hovertemplate='<b>Observert</b>: %{y:.1f} °C<extra></extra>',
         ))
 
+    # ── Uforstyrret nivå: referansen dippen måles mot ────────────────────────
+    _undist = forecast_df.attrs.get('undisturbed_level') if forecast_df is not None else None
+    if _undist is not None:
+        fig.add_hline(
+            y=_undist, line_dash='dot', line_width=1.4,
+            line_color='rgba(24,95,165,0.55)',
+            annotation_text=f"uforstyrret nivå {_undist:.1f} °C",
+            annotation_position='top left', annotation_font_size=10,
+        )
+
     # ── Tidligere prediksjoner (fasit-linjen) ────────────────────────────────
     if history_df is not None and not history_df.empty:
         hd = history_df.copy()
@@ -743,23 +753,16 @@ def page_informasjon():
 
     st.subheader("Prediksjonsmodell")
     st.markdown("""
-    Modellen predikerer **endringen** i vanntemperatur ved svømmestrekningen:
+    Modellen beskriver kuldeunderskuddet i elva i forhold til det nivået den ville
+    hatt uten hendelsen:
 
-    **T(t+h) = T_Fetsund(nå) + κ · [ T_Vorma(t−transporttid+h) − T_Vorma(t−transporttid) ]**
+    **T(t+h) = uforstyrret nivå + κ · Vorma-anomali(t + h − transporttid)**
 
-    Med andre ord: den temperaturendringen som allerede har skjedd i Vorma, forplanter
-    seg nedover elva og treffer Fetsund én transporttid senere, dempet med faktoren κ.
-
-    Den tidligere nivåformen (Fetsund-baseline + Vorma-anomali × κ) er forlatt fordi
-    Fetsund-baselinen allerede inneholder den kaldpulsen som Vorma-anomalien la til
-    på nytt — den samme pulsen ble talt to ganger. Validert mot 10 552 timer
-    juli–august 2017–2025 (horisont = transporttid):
-
-    | Form | MAE |
-    |---|---|
-    | Nivåform (t.o.m. v1.6) | 0,84 °C |
-    | Ren persistens, ingen modell | 0,74 °C |
-    | **Inkrementform (nå)** | **0,54 °C** |
+    Det uforstyrrede nivået er 90-persentilen over sju døgn. En høy persentil er
+    valgt framfor et gjennomsnitt eller en median fordi en kaldepisode ikke kan
+    trekke den nedover — et 48-timers gjennomsnitt blir kontaminert av selve pulsen
+    man vil måle avviket fra. Testet mot 5, 7 og 10 døgn og p90, p95 og maks; sju
+    døgn med p90 ga sterkest samvariasjon mellom stasjonene (r = 0,855).
 
     #### Uttynningen κ beregnes, den er ikke en konstant
 
@@ -808,6 +811,49 @@ def page_informasjon():
         """)
 
     st.markdown("""
+    #### To ting modellen tok feil av før v1.8
+
+    **Båndet motsa seg selv.** Med et symmetrisk ± σ ble øvre grense varmere enn
+    utgangspunktet så snart en stor kaldpuls var i transitt. Modellen «visste» at
+    kaldt vann var på vei, men båndet sa samtidig at det kunne bli varmere. Målt
+    på 51 historiske kaldepisoder skjedde det i 43 % av dem selv der kaldvannet
+    allerede var **observert** i Vorma. Empirisk er responsen
+    A_Fetsund / A_Vorma negativ i 0,1 % av tilfellene ved store anomalier
+    (n = 2 248) – usikkerheten ligger i hvor kraftig utslaget blir, ikke i
+    fortegnet. Båndet bygges derfor nå av forsterkningskvantiler:
+
+    | | κ-faktor | ved κ = 0,63 |
+    |---|---|---|
+    | 68 %-området | 0,68 – 1,30 | 0,43 – 0,82 |
+    | 95 %-området | 0,40 – 1,60 | 0,25 – 1,01 |
+
+    Andelen episoder der båndet motsier sin egen dipp innenfor datahorisonten er
+    dermed nede i 11 %, og de gjenværende tilfellene er marginale dipper rundt
+    én grad, der tvilen er reell.
+
+    #### Dippen varer nå like lenge som i virkeligheten
+
+    Den gamle modellen lot anomalien relaksere mot null, så prognosen spratt
+    tilbake til – og forbi – utgangspunktet etter drøyt to døgn. Måledata sier
+    noe helt annet. Andel av dippdybden som står igjen, målt mot fryst
+    førhendelsesnivå over 51 episoder:
+
+    | Etter | +12 t | +24 t | +36 t | +48 t | +72 t | +120 t |
+    |---|---|---|---|---|---|---|
+    | Igjen av dippen | 0,85 | 0,76 | 0,51 | 0,47 | 0,42 | **0,48** |
+
+    Den planer ut rundt 45–48 %. Den går ikke mot null: etter en oppvelling er
+    Mjøsas epilimnion blandet, og elva legger seg på et nytt og kaldere nivå som
+    holder seg i flere døgn. Relaksasjonen har derfor tre ledd – en rask
+    komponent (τ = 24 t), en treg (τ = 300 t) og et permanent restnivå på 30 %.
+
+    Resultat på de samme 51 episodene, alt målt mot uforstyrret nivå:
+
+    | | v1.6 | v1.7 | **v1.8** | Fasit |
+    |---|---|---|---|---|
+    | Dippdybde | 3,4 °C | 2,5 °C | **3,6 °C** | 4,9 °C |
+    | Varighet under −1 °C | 84 t | 120 t | **126 t** | 112 t |
+
     #### Usikkerheten skalerer med hvor mye som er i bevegelse
 
     Residualen er sterkt heteroskedastisk. Målt over de samme 10 552 timene:
@@ -1074,8 +1120,8 @@ def page_prediksjon():
     st.caption(
         f"Frem til datahorisonten (+{travel_h_now:.0f} t) er prediksjonen basert på "
         "**observert vann i Vorma**, og predikerer endringen fra dagens Fetsund-måling: "
-        "ΔT_Fetsund = κ · ΔT_Vorma, der κ beregnes fra sist målte vannføring "
-        f"(nå {kappa_now:.2f}). Validert MAE 0,54 °C. "
+        "T = uforstyrret nivå + κ · Vorma-anomali, der κ beregnes fra sist målte "
+        f"vannføring (nå {kappa_now:.2f}). "
         "Etter datahorisonten er det ekstrapolering – kun vindenergi-signalet (E) gir "
         "reell fremoverskuende informasjon (AUC = 0,87 for ΔT < −3 °C)."
     )
@@ -1128,9 +1174,8 @@ def page_prediksjon():
                 _sig = row.get('sigma')
                 _dv  = row.get('delta_vorma')
                 help_str   = (
-                    "Basert på observert vann i Vorma (inkrementform, validert "
-                    "MAE 0,54 °C)."
-                    + (f" ΔT_Vorma under transport = {_dv:+.1f} °C." if pd.notna(_dv) else "")
+                    "Basert på observert vann i Vorma (anomaliform)."
+                    + (f" Vorma-anomali under transport = {_dv:+.1f} °C." if pd.notna(_dv) else "")
                     + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
                 )
             else:
@@ -1142,8 +1187,8 @@ def page_prediksjon():
                               if risk in ("advarsel", "alarm") else "off")
                 _sig = row.get('sigma')
                 help_str   = (
-                    "Ekstrapolering: Vorma-anomalien relakserer mot 72-timers medianen "
-                    f"(e-foldingstid {VORMA_RELAX_HOURS} t). Vindrisiko-nivå fra prognosert "
+                    "Ekstrapolering: Vorma-anomalien relakserer mot et permanent restnivå "
+                    f"({100*RELAX_PERSISTENT:.0f} % av dybden står igjen). Vindrisiko-nivå fra prognosert "
                     "SE/S-vindenergi (Met.no, AUC = 0,87 for ΔT < −3 °C)."
                     + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
                 )
@@ -1190,10 +1235,16 @@ def page_prediksjon():
             )
         _sig_max = forecast_df['sigma'].max() if 'sigma' in forecast_df.columns else None
         st.caption(
+            "Prikket vannrett linje: **uforstyrret nivå** (7-døgns 90-persentil) – "
+            "temperaturen elva ville hatt uten kaldepisoden. Dippen måles mot den. "
             "Solid linje: observert (Fetsund) · stiplet linje: prediksjon · "
             "mørkt bånd: 68 % sannsynlig område · lyst bånd: 95 %. "
-            "Båndene er **risikojusterte**, ikke symmetriske konfidensintervaller: "
-            "nedre grense kan skjeves ned av vindvarselet uten at midtestimatet flyttes. "
+            "Båndene er **usymmetriske med hensikt**. Når en kaldpuls er observert i "
+            "Vorma, er usikkerheten hvor KRAFTIG den slår ut – ikke om den kommer. "
+            "Empirisk er responsen negativ i 0,1 % av tilfellene ved store anomalier, "
+            "så båndet bygges av forsterkningskvantiler (κ × 0,4 til κ × 1,6) i stedet "
+            "for et symmetrisk ± σ. Utenfor datahorisonten er tillegget ensidig: en "
+            "ukjent framtidig oppvellingshendelse kan bare gjøre det kaldere. "
             f"**Frem til datahorisonten (+{travel_h_now:.0f} t)** er prediksjonen basert på "
             "observert vann i Vorma. Bredden følger hvor stor temperaturendring som er "
             f"under transport (σ = √({SIGMA_BASE}² + ({SIGMA_PER_DELTA}·|ΔT_Vorma|)²)) – "
@@ -1730,12 +1781,12 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
-        st.caption(f"App 1.7.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
+        st.caption(f"App 1.8.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
         - Fetsund (mål): t = 9700 / Q
-        - Inkrementform, MAE 0,54 °C
+        - Anomaliform (v1.8)
         - κ = Q_Vorma/(Q_Vorma+Q_Glomma), beregnet
         - Validert 2018–2025 (AUC = 0,87)
         - Ettereffekt: dag 5–12 etter vindepisode
