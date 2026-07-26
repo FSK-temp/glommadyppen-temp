@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 # oppstart. Uten sjekken gir en delvis utrulling (ny app + gammel kjerne) bare
 # en sladdet NameError på Streamlit Cloud, som er nesten umulig å feilsøke.
 # Øk versjonen hver gang det legges til navn eller endres funksjonssignaturer.
-CORE_VERSION = "1.8.0"
+CORE_VERSION = "1.9.0"
 
 NVE_BASE_URL    = "https://hydapi.nve.no/api/v1"
 FROST_CLIENT_ID = "582507d2-434f-4578-afbd-919713bb3589"
@@ -131,6 +131,18 @@ ANOMALY_SIGMA_EXTRAP_WARM = 1.4  # °C
 # er bratt. Kalibrert slik at 95 %-båndet dekker ~95 % også ved +12 t.
 ANOMALY_SIGMA_BASE = 0.60  # °C
 ANOMALY_SIGMA_RAMP = 0.35  # andel av grunnstøyen som ligger der allerede ved h→0
+
+# Den grunnstøyen er nødvendig for dekningsgraden, men den er tosidig og ville
+# alene løftet øvre båndgrense over det uforstyrrede nivået igjen - altså gjeninn-
+# føre nettopp selvmotsigelsen v1.8 fjernet. Løsningen er en FYSISK skranke, ikke
+# et smalere bånd: er vannet i Vorma målt kaldere enn uforstyrret, kan Fetsund
+# ikke ende varmere enn sitt eget uforstyrrede nivå. Innenfor datahorisonten
+# kappes øvre grense derfor der, med et lite påslag for målestøy.
+# Etter skranken overstiger øvre 95 %-grense det uforstyrrede nivået med
+# median −0,41 °C over 53 kaldepisoder; bare 6 % av episodene overstiger med
+# mer enn 0,5 °C, og de tilfellene er marginale dipper rundt én grad der tvilen
+# er reell. Uten skranken var mediane overskridelse flere grader.
+UNDISTURBED_CAP_MARGIN = 0.25  # °C – slingringsmonn for sensor- og baselinestøy
 MODEL_SIGMA      = MODEL_SIGMA_ASYMPTOTE  # alias brukt i visningstekster
 MODEL_SIGMA_DATA = 0.6       # Beholdt for bakoverkompatibilitet (visningstekster)
 
@@ -233,6 +245,21 @@ ENERGY_WARN          = 45.0      # m·h – advarsel
 WIND_RISK_HORIZON_HOURS = 96      # t – utover dette anses vindvarselet for upålitelig
 WIND_ANOMALY_SLOPE      = -0.015  # °C per m·h (svak, empirisk - se analysenotat)
 WIND_ANOMALY_E_TYPISK   = 32.0    # m·h – median E i datasettet, brukt som nullpunkt
+# Vindrisikoen skal virke KUMULATIVT og VEDVARENDE, ikke som et øyeblikksbilde.
+# Fram til v1.8 ble E slått opp punktvis på hvert prognosetidspunkt, med tre
+# følger som alle ga urealistiske hakk i båndet:
+#   1) Passerte vindtoppen, forsvant risikoen igjen - som om kaldvannet den
+#      hadde skapt ble borte. Det motsier den empiriske relaksasjonskurven, der
+#      ~48 % av dippen står igjen etter fem døgn.
+#   2) σ-multiplikatoren hoppet i trinn (1.0 → 1.4 → 1.8) idet E krysset en
+#      terskel, og ga et synlig sprang i båndet mellom to nabopunkter.
+#   3) Ved WIND_RISK_HORIZON_HOURS falt hele justeringen bort på ett tidssteg.
+#      Målt sprang i nedre 68 %-grense: 3,7 °C på tre timer - den «spiken» som
+#      var synlig i grafen.
+# Nå bygges risikoen som et løpende maksimum med samme relaksasjon som
+# temperaturanomalien, og både multiplikator og horisont tones jevnt.
+WIND_RISK_FADE_HOURS = 36.0   # t – utfasing etter vindrisiko-horisonten
+
 WIND_SIGMA_MULT_WARN    = 1.4     # KI-bredde-multiplikator når E > advarselsterskel
 WIND_SIGMA_MULT_ALARM   = 1.8     # KI-bredde-multiplikator når E > alarmterskel
 
@@ -1207,6 +1234,38 @@ def build_wind_energy_series(frost_df, forecast_df,
     return df
 
 
+def _effective_wind_energy(energy_lookup, now_utc, h_step):
+    """
+    «Virksom» vindenergi ved prognosetidspunktet now + h_step.
+
+    Returnerer det høyeste E som har rukket å virke fram til dette tidspunktet,
+    dempet med relaxation_factor() etter at toppen passerte:
+
+        E_eff(h) = max over alle t ≤ h av  E(t) · relaksasjon(h − t)
+
+    Dette er den fysisk riktige formen. E er allerede et 48-timers akkumulat med
+    24 timers forsinkelse, så E(t) beskriver oppvelling som slår ut ved t. Når
+    den oppvellingen først har skjedd, forsvinner ikke det kalde vannet fordi
+    vinden løyer - det er nettopp poenget med det permanente restleddet i
+    relaksasjonsmodellen. Punktvis oppslag lot risikoen slå av igjen så snart
+    vindtoppen var passert.
+
+    Returnerer None hvis serien ikke dekker tidspunktet.
+    """
+    if energy_lookup is None or energy_lookup.empty:
+        return None
+    t_fut = now_utc + timedelta(hours=int(h_step))
+    past = energy_lookup[energy_lookup['time'] <= t_fut + pd.Timedelta(minutes=90)]
+    if past.empty:
+        return None
+    age_h = (t_fut - past['time']).dt.total_seconds() / 3600.0
+    age_h = age_h.clip(lower=0.0)
+    eff = past['E'].astype(float).values * relaxation_factor(age_h.values)
+    if len(eff) == 0 or not np.isfinite(eff).any():
+        return None
+    return float(np.nanmax(eff))
+
+
 def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
                            glomma_q_df=None, hours_ahead=120, step_h=3,
                            energy_df=None, mode=None, now=None):
@@ -1430,25 +1489,40 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
                 sigma_data, MODEL_SIGMA_ASYMPTOTE * ext_ramp))
         sigma = max(sigma_cold, sigma_warm)
 
-        # ── Vindrisiko-justering (kun innenfor pålitelig prognosehorisont) ──
+        # ── Vindrisiko-justering ────────────────────────────────────────────
+        # E_eff er ikke E på dette tidspunktet, men det høyeste E som har
+        # rukket å virke fram til hit, relaksert med samme kurve som
+        # temperaturanomalien. En vindtopp som har passert fortsetter altså å
+        # holde båndet åpent nedover, i stedet for å slå av og på.
         e_fc, risk_level = None, None
         sigma_mult, risk_shift = 1.0, 0.0
-        if energy_lookup is not None and h_step <= WIND_RISK_HORIZON_HOURS:
-            nearest = energy_lookup.iloc[
-                (energy_lookup['time'] - t_fut).abs().argsort()[:1]
-            ]
-            if not nearest.empty and abs(
-                (nearest.iloc[0]['time'] - t_fut).total_seconds()
-            ) <= 5400:  # 90 min toleranse
-                e_fc = float(nearest.iloc[0]['E'])
-                if e_fc >= ENERGY_THRESHOLD:
-                    sigma_mult, risk_level = WIND_SIGMA_MULT_ALARM, 'alarm'
-                elif e_fc >= ENERGY_WARN:
-                    sigma_mult, risk_level = WIND_SIGMA_MULT_WARN, 'advarsel'
-                else:
-                    risk_level = 'lav'
-                # Kun nedsiderisiko - vind gir aldri grunnlag for å anta varmere.
-                risk_shift = min(0.0, WIND_ANOMALY_SLOPE * (e_fc - WIND_ANOMALY_E_TYPISK))
+        if energy_lookup is not None:
+            e_fc = _effective_wind_energy(energy_lookup, now_utc, h_step)
+        if e_fc is not None:
+            # Jevn utfasing i stedet for en klippekant ved horisonten
+            if h_step <= WIND_RISK_HORIZON_HOURS:
+                horizon_w = 1.0
+            else:
+                horizon_w = float(np.exp(
+                    -(h_step - WIND_RISK_HORIZON_HOURS) / WIND_RISK_FADE_HOURS))
+
+            # Kontinuerlig multiplikator - ingen trinn ved tersklene
+            if e_fc <= ENERGY_WARN:
+                mult = 1.0 + (WIND_SIGMA_MULT_WARN - 1.0) * max(0.0, e_fc / ENERGY_WARN)
+                risk_level = 'lav'
+            elif e_fc <= ENERGY_THRESHOLD:
+                frac = (e_fc - ENERGY_WARN) / max(ENERGY_THRESHOLD - ENERGY_WARN, 1e-6)
+                mult = WIND_SIGMA_MULT_WARN + frac * (WIND_SIGMA_MULT_ALARM - WIND_SIGMA_MULT_WARN)
+                risk_level = 'advarsel'
+            else:
+                mult = WIND_SIGMA_MULT_ALARM
+                risk_level = 'alarm'
+
+            sigma_mult = 1.0 + (mult - 1.0) * horizon_w
+            # Kun nedsiderisiko - vind gir aldri grunnlag for å anta varmere.
+            risk_shift = horizon_w * min(
+                0.0, WIND_ANOMALY_SLOPE * (e_fc - WIND_ANOMALY_E_TYPISK))
+            e_fc = round(e_fc, 1)
 
         # Vindrisiko utvider kun kaldsiden - vind gir aldri grunnlag for å anta
         # varmere vann.
@@ -1463,6 +1537,18 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
         lo95 = base_lo[1] + risk_shift - 1.96 * cold_eff
         hi95 = base_hi[1] + 1.96 * warm_eff
 
+        # Fysisk skranke: er kaldvannet OBSERVERT i Vorma, kan Fetsund ikke ende
+        # varmere enn sitt eget uforstyrrede nivå. Gjelder bare innenfor
+        # datahorisonten - utenfor den vet vi ikke hva som kommer.
+        if (use_mode == 'anomaly' and not is_extrap
+                and d_vorma < 0 and fe_undist_now is not None):
+            cap = fe_undist_now + offset + UNDISTURBED_CAP_MARGIN
+            hi68 = min(hi68, cap)
+            hi95 = min(hi95, cap)
+            # Behold båndet velformet dersom skranken biter hardt
+            hi68 = max(hi68, pred)
+            hi95 = max(hi95, hi68)
+
         rows.append({
             'time':            t_fut,
             'predicted':       round(pred, 2),
@@ -1475,7 +1561,7 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             'kappa':           round(k_used, 3),
             'mode':            use_mode,
             'is_extrapolated': bool(is_extrap),
-            'wind_E_forecast': round(e_fc, 1) if e_fc is not None else None,
+            'wind_E_forecast': e_fc,
             'wind_risk_level': risk_level,
         })
 
@@ -1488,4 +1574,4 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
     return out
 
 
-__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
+__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
