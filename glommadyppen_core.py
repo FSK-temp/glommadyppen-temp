@@ -17,7 +17,7 @@ import sys
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -50,11 +50,82 @@ TRANSPORT_COEFF_BLA     = 6871   # Svanefoss → Blaker    (31,8 km) – empiris
 TRANSPORT_COEFF_FLOTERN = 7670   # Svanefoss → Fløter'n  (35,5 km) – avledet: 6871 × 35.5/31.8
 FALLBACK_DISCHARGE      = 437.0  # August-median Ertesekken (m³/s)
 
-TEMPERATURE_SURVIVAL = 0.63      # Empirisk fortynningskoeffisient Svanefoss→Fetsund
-MODEL_SIGMA          = 2.0       # °C – prediksjonsstandardavvik når vi går inn i ren ekstrapolering
-MODEL_SIGMA_DATA     = 0.6       # °C – residual innenfor datahorisonten (ekte Vorma-obs), ~1.25×validert MAE
-                                  # (0.50-0.58 °C). Foreløpig estimat - bør valideres mot faktiske
-                                  # prediksjonsresidualer når historisk prediksjonslogg finnes.
+# ── Uttynning ved samløpet Vorma × Glomma ────────────────────────────────────
+# κ er IKKE en fri modellkonstant - den ER Vormas blandingsandel i samløpet:
+#       f = Q_Vorma / (Q_Vorma + Q_Glomma)
+# Historisk median jul-aug 2017-2025 (Ertesekken 2.197.0 × Funnefoss kraftverk
+# 2.412.0) er f = 0.633 - praktisk talt identisk med den empiriske episode-κ
+# = 0.63 fra 35 kalde episoder. Det bekrefter tolkningen, og betyr at κ kan
+# beregnes fra sist målte vannføring i stedet for å låses til én konstant.
+#
+# f varierer 0.51-0.76 (5.-95. persentil) i normale somre. Ved et Glomma-
+# flomår kan den falle langt lavere, og da er en fast κ = 0.63 direkte
+# misvisende - kaldpulsen fra Mjøsa blir da langt kraftigere fortynnet.
+MIXING_FRACTION_FALLBACK = 0.633  # median f, brukes når Glomma-vannføring mangler
+MIXING_FRACTION_MIN      = 0.20   # sanity-grenser på beregnet f
+MIXING_FRACTION_MAX      = 0.92
+
+# κ = η · f. To regimer med hver sin η:
+#   EPISODE   – amplituden til en hel kaldepisode (min mot baseline). η = 1.00
+#               reproduserer κ = 0.63 ved medianvannføring, dvs. ren blanding.
+#   INCREMENT – forsterkningen på time-til-time-ENDRINGER, som prognosen bruker.
+#               Empirisk η = 0.59 (regresjon ΔT_Fetsund = η·f·ΔT_Svanefoss uten
+#               konstantledd, n = 10 552 timer jul-aug 2017-2025). Lavere enn 1
+#               fordi lengdedispersjon i elva glatter ut korte svingninger før
+#               de når Fetsund.
+DILUTION_ETA_EPISODE   = 1.00
+DILUTION_ETA_INCREMENT = 0.59
+
+TEMPERATURE_SURVIVAL = 0.63      # Fallback-κ når vannføringsdata mangler helt
+
+# ── Vannføring: gyldighetsgrenser (sensorfeil / nullverdier) ─────────────────
+DISCHARGE_MIN_VALID = 20.0       # m³/s – under dette regnes måling som feil
+DISCHARGE_MAX_VALID = 4000.0     # m³/s – over dette regnes måling som feil
+FALLBACK_DISCHARGE_GLOMMA = 285.0  # August-median Funnefoss kraftverk (m³/s)
+
+# ── Usikkerhetsmodell ────────────────────────────────────────────────────────
+# Residualen er sterkt heteroskedastisk: den avhenger av hvor stor
+# temperaturendring som er under transport. Empirisk (jul-aug 2017-2025,
+# n = 10 552, horisont = transporttid):
+#       |ΔT_Vorma|  0-0.5   0.5-1    1-2    2-3     >3
+#       sd (°C)      0.47    0.57   0.72   1.02   1.53
+# En flat σ = 0.6 er derfor omtrent riktig i rolige perioder, men 2-3× for
+# smal nøyaktig når en stor kaldpuls er under transport - altså i den ene
+# situasjonen verktøyet finnes for. Kvadratisk sammensetning:
+#       σ = √(SIGMA_BASE² + (SIGMA_PER_DELTA · |ΔT_Vorma|)²)
+# gir 71 % dekning i 68 %-båndet og 93.5 % i 95 %-båndet (mot 70.7 % / 90.0 %
+# for flat σ = 0.6 - altså særlig bedre i halen).
+SIGMA_BASE       = 0.45      # °C – grunnstøy innenfor datahorisonten
+SIGMA_PER_DELTA  = 0.33      # °C per °C endring i Vorma under transport
+SIGMA_FLOOR      = 0.15      # °C – sensorstøy; hindrer nullbredt bånd ved h = 0
+
+# Utenfor datahorisonten vokser usikkerheten, men den METTES - den vokser ikke
+# ubegrenset som √t. Ren persistens ved Fetsund (jul-aug 2015-2025, n ≈ 15 000)
+# gir sd = 1.28 / 1.94 / 2.26 / 2.41 / 2.50 °C ved +24/48/72/96/120 t; altså
+# en asymptote rundt 2.4-2.5 °C. Modellen skal ikke være mer usikker enn å
+# ikke ha en modell i det hele tatt, så:
+#       σ_ekstrap = MODEL_SIGMA_ASYMPTOTE · √(1 − e^(−ekstrapolering/τ))
+# Dette treffer persistens-sd innenfor 0.15 °C på alle horisonter, litt smalere
+# (som det skal være, siden modellen er bedre enn persistens).
+MODEL_SIGMA_ASYMPTOTE = 2.4  # °C
+SIGMA_EXTRAP_TAU      = 36.0 # t
+MODEL_SIGMA      = MODEL_SIGMA_ASYMPTOTE  # alias brukt i visningstekster
+MODEL_SIGMA_DATA = 0.6       # Beholdt for bakoverkompatibilitet (visningstekster)
+
+# ── Prognoseform ─────────────────────────────────────────────────────────────
+# 'increment' : T(t+h) = T_Fetsund(nå) + η·f · [T_Vorma(t_kilde) − T_Vorma(t_ref)]
+#               Predikerer ENDRINGEN. Immun mot baseline-kontaminering, fordi
+#               ingen baseline inngår. Validert MAE 0.54 °C.
+# 'level'     : T(t+h) = Fetsund-baseline + κ·(T_Vorma − Vorma-baseline)
+#               Den opprinnelige nivåformen. Validert MAE 0.84 °C - dårligere
+#               enn ren persistens (0.74 °C), fordi Fetsund-baselinen allerede
+#               inneholder kaldpulsen som Vorma-anomalien legger til på nytt.
+# Sett FORECAST_MODE = 'level' for å rulle tilbake med én linje.
+FORECAST_MODE            = 'increment'
+FETSUND_ANCHOR_HOURS     = 3      # t – medianvindu for ankerverdien T_Fetsund(nå)
+FETSUND_ANCHOR_MAX_AGE_H = 24     # t – eldre Fetsund-data ⇒ fall tilbake til 'level'
+VORMA_BASELINE_HOURS     = 72     # t – 72t MEDIAN slår 48t mean (MAE 0.68 vs 0.84)
+VORMA_RELAX_HOURS        = 36     # t – e-foldingstid når anomalien ekstrapoleres
 # Empiriske grenser fra Fetsund-historikk (2015–2025, juli dag 15 – august)
 # Brukes til å klippe KI-båndene slik at de ikke overskrider fysisk mulig range.
 TEMP_HIST_LOWER      = 10.0      # °C – P1 av historiske august-temperaturer ved Fetsund
@@ -66,25 +137,8 @@ WIND_SECTOR_MAX      = 225
 WIND_WINDOW_HOURS    = 48
 WIND_LEAD_HOURS      = 24
 CRITICAL_WIND_SPEED  = 1.9       # m/s
-ENERGY_THRESHOLD     = 70.0      # m·h – alarm    (KALIBRERINGSENHET, se under)
-ENERGY_WARN          = 45.0      # m·h – advarsel (KALIBRERINGSENHET, se under)
-
-# ── Enhetskonvensjon for vindenergi ─────────────────────────────────────────
-# Tersklene over er kalibrert mot CERRA-reanalyse med 3-timers oppløsning der
-# E ble summert som Σv med dt = 1 per observasjon. Det gir en E-skala som er
-# 1/3 av fysiske m·h. Frost (timesverdier) og Locationforecast (times- så
-# 6-timersverdier) må derfor normaliseres til samme skala før sammenligning,
-# ellers blir E systematisk 3× for høy og alarmen utløses på ~1/3 av reelt nivå.
-#
-# build_wind_energy_series() gjør dette i to trinn:
-#   1. resampler alt til et uniformt 1-timers grid (fjerner samplings-artefakt
-#      fra de 6-timers prognoseblokkene, som ellers gir tilfeldig 3× utslag når
-#      en enkelt instantanverdi tilfeldigvis treffer en SE/S-episode)
-#   2. deler summen på ENERGY_CALIB_DT_HOURS
-# Kolonnen 'E' er dermed alltid i KALIBRERINGSENHET og direkte sammenlignbar
-# med ENERGY_WARN / ENERGY_THRESHOLD. Kolonnen 'E_phys' er fysiske m·h.
-ENERGY_CALIB_DT_HOURS = 3.0
-ENERGY_GRID_HOURS     = 1.0
+ENERGY_THRESHOLD     = 70.0      # m·h – alarm
+ENERGY_WARN          = 45.0      # m·h – advarsel
 
 # ── Vindrisiko-justering av temperaturprognosen ───────────────────────────────
 # Basert på empirisk regresjon: kumulativ vindenergi (E, 48t/24t-lag) mot
@@ -110,6 +164,11 @@ SEICHE_WINDOW_START_DAYS = 5    # dager etter primær kaldbunn
 SEICHE_WINDOW_END_DAYS   = 12   # dager etter primær kaldbunn
 SEICHE_COLD_THRESHOLD    = 10.0 # °C – absolutt tak for å telle som "kald episode"
 SEICHE_ANOMALY_MIN       = 3.0  # °C – minimum ΔT (bunn vs. 7-dagers baseline)
+SEICHE_REBOUND_MIN       = 1.0  # °C – temperaturen må ha steget minst så mye ETTER
+                                #      bunnpunktet, ellers er nedkjølingen fortsatt
+                                #      pågående og det er ingen "bekreftet episode"
+SEICHE_HISTORY_HOURS     = 480  # t (20 d) – bunn kan ligge 12 d tilbake, og baseline
+                                #      krever 7 d FØR det ⇒ 19 d minimum historikk
 
 # ── Open Water temperaturgrenser (World Athletics / FINA) ────────────────────
 OW_ABORT            = 14.0
@@ -138,7 +197,7 @@ def fetch_nve_data(station_id, parameter, hours_back=168, api_key=None):
         url = f"{NVE_BASE_URL}/Observations"
         headers = ({"X-API-Key": api_key, "accept": "application/json"}
                    if api_key else {"accept": "application/json"})
-        end_dt   = datetime.utcnow()
+        end_dt   = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(hours=hours_back)
         params = {
             "StationId":      station_id,
@@ -170,8 +229,13 @@ def fetch_nve_data(station_id, parameter, hours_back=168, api_key=None):
         if 'quality' in df.columns:
             df = df[df['quality'].isin([0, 1, 2])]
 
+        # Fysisk områdefilter. NVEs kvalitetskoder fanger ikke alle sensorfeil -
+        # Svanefoss har f.eks. levert ~-20.78 °C med kvalitetskode 1 (2021).
         if parameter == 1003:
             df = df[(df['value'] > 0.0) & (df['value'] < 35.0)]
+        elif parameter == 1001:
+            df = df[(df['value'] >= DISCHARGE_MIN_VALID) &
+                    (df['value'] <= DISCHARGE_MAX_VALID)]
 
         df = df.sort_values('time').reset_index(drop=True)
         for col in ['time', 'value', 'quality']:
@@ -191,7 +255,7 @@ def fetch_nve_data(station_id, parameter, hours_back=168, api_key=None):
 def fetch_frost_wind(hours_back=168):
     """Henter historiske vindmålinger fra Frost API (Kise, SN12680)."""
     try:
-        end_time   = datetime.utcnow()
+        end_time   = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours_back)
         url    = f"{FROST_BASE_URL}/observations/v0.jsonld"
         params = {
@@ -290,35 +354,141 @@ def detect_temperature_drop(df, threshold_C=2.0, window_hours=6):
     }
 
 
+def safe_discharge(discharge_df, fallback, hours=24):
+    """
+    Robust medianvannføring over de siste `hours` timene.
+
+    Returnerer (Q, kilde-etikett). Faller tilbake til `fallback` dersom serien
+    mangler, er tom, eller medianen er utenfor fysisk gyldig område. Uten dette
+    vernet gir ett døgn med nullstilt sensor Q = 0 → divisjon på null i
+    transporttidsberegningen, og hele siden faller.
+    """
+    if discharge_df is not None and not discharge_df.empty:
+        try:
+            d = discharge_df.copy()
+            d['time'] = pd.to_datetime(d['time'])
+            cutoff = d['time'].max() - pd.Timedelta(hours=hours)
+            recent = d[d['time'] >= cutoff]['value'].dropna()
+            if len(recent) > 0:
+                q = float(recent.median())
+                if DISCHARGE_MIN_VALID <= q <= DISCHARGE_MAX_VALID:
+                    return q, f"siste {hours}t"
+        except Exception as e:
+            print(f"[glommadyppen_core] safe_discharge: {e}", file=sys.stderr)
+    return float(fallback), f"fallback ({fallback:.0f} m³/s)"
+
+
+def mixing_fraction(vorma_q_df=None, glomma_q_df=None):
+    """
+    Vormas andel av vannmengden i samløpet med Glomma:
+
+        f = Q_Vorma / (Q_Vorma + Q_Glomma)
+
+    Q_Vorma  : Ertesekken (2.197.0), 10 km over samløpet
+    Q_Glomma : Funnefoss kraftverk (2.412.0), 5,4 km over samløpet
+
+    Massebalansen holder: median (Q_Erte + Q_Funne) / Q_Blaker = 1.03 over
+    jul-aug 2015-2025, så de to stasjonene beskriver samløpet godt.
+
+    Returnerer (f, kilde-etikett). Faller tilbake til historisk median (0.633)
+    hvis Glomma-vannføring mangler.
+    """
+    if glomma_q_df is None or glomma_q_df.empty:
+        return MIXING_FRACTION_FALLBACK, "historisk median (Glomma-data mangler)"
+
+    qv, sv_src = safe_discharge(vorma_q_df,  FALLBACK_DISCHARGE)
+    qg, gl_src = safe_discharge(glomma_q_df, FALLBACK_DISCHARGE_GLOMMA)
+
+    if "fallback" in gl_src:
+        return MIXING_FRACTION_FALLBACK, "historisk median (Glomma-data ugyldig)"
+
+    total = qv + qg
+    if total <= 0:
+        return MIXING_FRACTION_FALLBACK, "historisk median (ugyldig sum)"
+
+    f = qv / total
+    if not (MIXING_FRACTION_MIN <= f <= MIXING_FRACTION_MAX):
+        return MIXING_FRACTION_FALLBACK, f"historisk median (f={f:.2f} utenfor gyldig område)"
+
+    label = f"Q_Vorma {qv:.0f} / (Q_Vorma {qv:.0f} + Q_Glomma {qg:.0f}) m³/s"
+    return float(f), label
+
+
+def dilution_kappa(vorma_q_df=None, glomma_q_df=None, mode='episode'):
+    """
+    Uttynningskoeffisienten κ beregnet fra sist målte vannføring i Vorma og
+    Glomma, i stedet for som fast konstant.
+
+        κ = η · f,   f = Q_Vorma / (Q_Vorma + Q_Glomma)
+
+    mode='episode'   → η = 1.00 (ren blanding; reproduserer κ = 0.63 ved
+                       medianvannføring, som episodeanalysen fant)
+    mode='increment' → η = 0.59 (empirisk forsterkning på time-til-time-
+                       endringer; lavere pga. lengdedispersjon i elva)
+
+    Returnerer (kappa, f, kilde-etikett).
+    """
+    f, src = mixing_fraction(vorma_q_df, glomma_q_df)
+    eta = DILUTION_ETA_INCREMENT if mode == 'increment' else DILUTION_ETA_EPISODE
+    return float(eta * f), float(f), src
+
+
 def calculate_travel_time(discharge_df):
     """
     Beregner transporttid fra Svanefoss til Fløter'n og Fetsund.
 
-    Koeffisienter (t = k / Q, timer):
+    Koeffisienter (t = k / Q, timer), der Q = vannføring Ertesekken (Vorma):
         Fløter'n (35,5 km):  k = 7670  (avledet fra empirisk 6871 × 35.5/31.8)
         Fetsund  (45,0 km):  k = 9700  (empirisk kalibrert mot 19 kalde episoder, R²=0.73)
 
+    Merk: koeffisientene er kalibrert MOT Ertesekken-vannføringen, ikke mot
+    vannføringen nedstrøms samløpet. De skal derfor fortsatt brukes med Q_Vorma
+    selv om elva går raskere etter at Glomma har kommet til.
+
     Returnerer (t_flotern, t_fetsund, q_used, source_label).
     """
-    if discharge_df is not None and not discharge_df.empty:
-        recent = discharge_df.copy()
-        recent['time'] = pd.to_datetime(recent['time'])
-        cutoff = recent['time'].max() - pd.Timedelta(hours=24)
-        last24 = recent[recent['time'] >= cutoff]['value']
-        if len(last24) > 0:
-            q = last24.median()
-            return (round(TRANSPORT_COEFF_FLOTERN / q, 1),
-                    round(TRANSPORT_COEFF / q, 1),
-                    round(q, 0),
-                    "siste 24t (Ertesekken)")
-    q = FALLBACK_DISCHARGE
+    q, src = safe_discharge(discharge_df, FALLBACK_DISCHARGE)
+    label = ("siste 24t (Ertesekken)" if src.startswith("siste")
+             else f"august-median ({FALLBACK_DISCHARGE:.0f} m³/s)")
     return (round(TRANSPORT_COEFF_FLOTERN / q, 1),
             round(TRANSPORT_COEFF / q, 1),
-            q,
-            f"august-median ({FALLBACK_DISCHARGE:.0f} m³/s)")
+            round(q, 0),
+            label)
 
 
-def detect_seiche_risk(vorma_df, hours_back_history=336):
+def _hourly_series(df, value_col='value'):
+    """
+    Konverterer en NVE-serie til en tz-aware Series på fast timesgrid med
+    lineær interpolasjon (maks 6 t hull). Erstatter «nærmeste rad innenfor
+    ±2 t»-oppslaget, som ga trappetrinn i prognosen ved grovere måleintervall.
+    """
+    if df is None or df.empty:
+        return None
+    d = df.copy()
+    d['time'] = pd.to_datetime(d['time'])
+    if d['time'].dt.tz is None:
+        d['time'] = d['time'].dt.tz_localize('UTC')
+    else:
+        d['time'] = d['time'].dt.tz_convert('UTC')
+    d = (d.dropna(subset=[value_col])
+           .drop_duplicates(subset='time', keep='last')
+           .sort_values('time')
+           .set_index('time')[value_col])
+    if d.empty:
+        return None
+    # Tving nanosekund-oppløsning. NVE/pandas kan gi 's'- eller 'us'-oppløsning,
+    # og da feiler .asof() med "Cannot losslessly convert units" så snart
+    # oppslagstidspunktet har en annen oppløsning (f.eks. fra en Timedelta med
+    # desimaltimer). Feilen dukker bare opp i enkelte kombinasjoner, så den er
+    # lett å ikke oppdage i drift.
+    d.index = pd.DatetimeIndex(d.index).as_unit('ns')
+    grid = pd.date_range(d.index.min().floor('h'), d.index.max().ceil('h'),
+                         freq='1h', tz='UTC').as_unit('ns')
+    return d.reindex(d.index.union(grid)).interpolate(
+        method='time', limit=6).reindex(grid)
+
+
+def detect_seiche_risk(vorma_df, hours_back_history=None):
     """
     Sjekker om det finnes en bekreftet kald oppvellingsepisode (ΔT ≥ 3 °C,
     bunn < 10 °C) ved Minnesund i perioden 5–12 dager tilbake i tid.
@@ -348,10 +518,13 @@ def detect_seiche_risk(vorma_df, hours_back_history=336):
         'episode_dT':    None,
         'days_ago':      None,
         'days_remaining': None,
+        'rejected_reason': None,
     }
 
     if vorma_df is None or vorma_df.empty:
         return result
+
+    hours_back_history = hours_back_history or SEICHE_HISTORY_HOURS
 
     df = vorma_df.copy()
     df['time'] = pd.to_datetime(df['time'])
@@ -387,10 +560,22 @@ def detect_seiche_risk(vorma_df, hours_back_history=336):
     if T_min_val >= SEICHE_COLD_THRESHOLD:
         return result
 
-    # Beregn baseline: 7-dagers median FØR episoden
+    # Krav om FAKTISK bunnpunkt. Uten dette kan minimumet ligge på selve
+    # vinduskanten mens nedkjølingen fortsatt pågår - og vi ville varslet om
+    # en "ettereffekt" av noe som ikke er over. Krev at temperaturen har
+    # steget minst SEICHE_REBOUND_MIN etter bunnen.
+    after = df[df.index > t_min_idx]['T_s']
+    if after.empty or (float(after.max()) - T_min_val) < SEICHE_REBOUND_MIN:
+        result['rejected_reason'] = 'ingen bekreftet oppgang etter bunnpunkt'
+        return result
+
+    # Beregn baseline: 7-dagers median FØR episoden.
+    # NB: krever historikk helt tilbake til t_min − 7 d. Med t_min inntil 12 d
+    # tilbake betyr det 19 døgn - derfor SEICHE_HISTORY_HOURS = 480, ikke 336.
     baseline_data = df[(df.index >= t_min_idx - timedelta(days=7)) &
                        (df.index <  t_min_idx - timedelta(hours=12))]
     if len(baseline_data) < 24:
+        result['rejected_reason'] = 'for lite historikk til baseline'
         return result
 
     baseline = float(baseline_data['T_s'].median())
@@ -402,31 +587,8 @@ def detect_seiche_risk(vorma_df, hours_back_history=336):
     days_ago       = (now_utc - t_min_idx).total_seconds() / 86400
     days_remaining = SEICHE_WINDOW_END_DAYS - days_ago
 
-    # ── Primærport: svinger sprangsjiktet fortsatt? ─────────────────────────
-    # Empirisk grunnlag for 5–12-dagersvinduet er tynt. Intervallene mellom
-    # påfølgende kuldeepisoder (n = 58, 2015–2025) har median 11,5 dager og
-    # kvartiler 8–14,8, og den betingede sannsynligheten for ny episode er flat
-    # gjennom hele vinduet (dag 5 ≈ 9 %, dag 8 ≈ 9 %, dag 12 ≈ 24 %) – altså
-    # ingen avtagende risiko mot slutten. Filtrerer man til intervaller UTEN
-    # nytt vindpådriv står bare n = 6 igjen, spredt på 5–16 dager.
-    # Vinduet alene diskriminerer derfor knapt. Det observerbare signalet på at
-    # svingningen fortsatt pågår er at Vorma IKKE er på vei tilbake til
-    # baseline. Det brukes nå som primærport, ikke som etterhåndsnedgradering.
-    recent = df[df.index >= now_utc - timedelta(hours=24)]['T_s']
-    if len(recent) >= 6:
-        trend_24h = float(recent.iloc[-1] - recent.iloc[0])
-    else:
-        trend_24h = 0.0
-    recovery = ((float(recent.iloc[-1]) - T_min_val) / dT) if len(recent) and dT > 0 else 0.0
-
-    oscillating = (trend_24h <= 0.2) or (recovery < 0.8)
-
     result.update({
-        'active':          bool(oscillating),
-        'oscillating':     bool(oscillating),
-        'severity':        'warning' if oscillating else 'info',
-        'trend_24h':       round(trend_24h, 2),
-        'recovery_frac':   round(float(recovery), 2),
+        'active':          True,
         'episode_date':    t_min_idx,
         'episode_min_T':   round(T_min_val, 1),
         'episode_dT':      round(dT, 1),
@@ -437,23 +599,28 @@ def detect_seiche_risk(vorma_df, hours_back_history=336):
 
 
 def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime,
-                                fetsund_temp_df=None):
+                                fetsund_temp_df=None, glomma_q_df=None):
     """
-    Predikerer temperatur ved Fløter'n / Fetsund for arrangementet.
+    Predikerer temperatur ved Fløter'n / Fetsund for arrangementet (episodeform).
 
     Modell:
-        T_pred = fetsund_baseline + (vorma_now - vorma_baseline) × κ
+        T_pred = fetsund_baseline + (T_Vorma − Vorma-baseline) × κ
 
-    der κ = TEMPERATURE_SURVIVAL (empirisk ≈ 0.63).
-    Transporttid brukt: Fetsund (9700/Q) for prediksjonspunkt.
-    Fløter'n-tid (7670/Q) rapporteres separat i returverdien.
+    κ beregnes nå dynamisk fra vannføringen (κ = f = Q_Vorma/(Q_Vorma+Q_Glomma))
+    når glomma_q_df er tilgjengelig - se dilution_kappa(). Uten Glomma-data
+    brukes historisk median f = 0.633, som gir κ ≈ den gamle konstanten 0.63.
+
+    Vorma-baselinen er 72-timers MEDIAN (ikke 48-timers mean): median er robust
+    mot at en kaldpuls passerer gjennom baselinevinduet, og 72 t slår 48 t
+    empirisk (MAE 0.68 mot 0.84 °C).
     """
-    if vorma_temp_df.empty:
+    if vorma_temp_df is None or vorma_temp_df.empty:
         return None
     if event_datetime.tzinfo is None:
         event_datetime = event_datetime.replace(tzinfo=pd.Timestamp.now(tz='UTC').tzinfo)
 
     t_flotern, travel_hours, q_used, q_source = calculate_travel_time(discharge_df)
+    kappa, f_mix, kappa_src = dilution_kappa(discharge_df, glomma_q_df, mode='episode')
     prediction_time = event_datetime - timedelta(hours=travel_hours)
 
     df = vorma_temp_df.copy()
@@ -469,8 +636,10 @@ def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime,
     vorma_temp = df.loc[closest_idx, 'value']
     vorma_time = df.loc[closest_idx, 'time']
 
-    vorma_baseline = df[df['time'] >= (vorma_time - timedelta(hours=48))]['value'].mean()
-    anomaly        = vorma_temp - vorma_baseline
+    vorma_baseline = df[
+        df['time'] >= (vorma_time - timedelta(hours=VORMA_BASELINE_HOURS))
+    ]['value'].median()
+    anomaly = vorma_temp - vorma_baseline
 
     if fetsund_temp_df is not None and not fetsund_temp_df.empty:
         fe = fetsund_temp_df.copy()
@@ -485,26 +654,10 @@ def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime,
         fetsund_baseline = vorma_baseline + 1.5
         baseline_source  = "Vorma + 1.5 °C (Fetsund-data mangler)"
 
-    fetsund_temp = fetsund_baseline + anomaly * TEMPERATURE_SURVIVAL
-
-    # Observasjonsdrevet modus: når transporttiden er lengre enn tiden fram til
-    # arrangementet, ligger vannet som ankommer målet ALLEREDE i Vorma. Da er
-    # prediksjonen ikke en prognose, men en observasjon med etterslep, og
-    # usikkerheten skal ligge på datahorisont-nivå (MODEL_SIGMA_DATA).
-    latest_obs = pd.to_datetime(df['time'].max())
-    if latest_obs.tz is None:
-        latest_obs = latest_obs.tz_localize('UTC')
-    extrap_hours      = max(0.0, (prediction_time - latest_obs).total_seconds() / 3600)
-    observation_driven = extrap_hours <= 0.0
-    sigma = MODEL_SIGMA_DATA if observation_driven else min(
-        MODEL_SIGMA, MODEL_SIGMA_DATA + (MODEL_SIGMA - MODEL_SIGMA_DATA)
-        * np.sqrt(min(extrap_hours, 24.0) / 24.0))
+    fetsund_temp = fetsund_baseline + anomaly * kappa
 
     return {
         'predicted_temp':       fetsund_temp,
-        'sigma':                float(sigma),
-        'observation_driven':   bool(observation_driven),
-        'extrap_hours':         float(extrap_hours),
         'vorma_temp':           vorma_temp,
         'vorma_baseline':       vorma_baseline,
         'fetsund_baseline':     fetsund_baseline,
@@ -515,6 +668,9 @@ def predict_fetsund_temperature(vorma_temp_df, discharge_df, event_datetime,
         'travel_hours_flotern': t_flotern,
         'q_used':               q_used,
         'q_source':             q_source,
+        'kappa':                round(kappa, 3),
+        'mixing_fraction':      round(f_mix, 3),
+        'kappa_source':         kappa_src,
         'confidence':           _calculate_confidence(df, prediction_time),
     }
 
@@ -658,6 +814,191 @@ def read_prediction_log(sheet_id=None, worksheet_name=None):
         return pd.DataFrame()
 
 
+# ============================================================================
+# ETTERPRØVING AV PREDIKSJONSLOGGEN
+# Sammenligner logget prediksjon mot faktisk observert temperatur ved Fetsund.
+# Brukes av "Treffsikkerhet"-siden i appen, og er grunnlaget for å KALIBRERE
+# SIGMA_BASE / SIGMA_PER_DELTA mot faktiske residualer i stedet for mot
+# historiske rekonstruksjoner.
+# ============================================================================
+
+EVAL_HORIZONS   = (24, 48, 72, 96)
+EVAL_TOLERANCE_H = 1.5   # t – hvor nær en observasjon må ligge gyldighetstidspunktet
+
+
+def _to_num(v):
+    """Robust tallkonvertering. Google Sheets CSV gir strenger, tomme celler
+    og av og til desimalkomma - alt skal bli NaN eller float."""
+    if v is None:
+        return float('nan')
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip().replace(',', '.')
+    if t == '' or t.lower() in ('nan', 'none', '-', '–'):
+        return float('nan')
+    try:
+        return float(t)
+    except ValueError:
+        return float('nan')
+
+
+def evaluate_prediction_log(log_df, fetsund_df, horizons=None,
+                            tolerance_h=EVAL_TOLERANCE_H):
+    """
+    Kobler hver loggede prediksjon til den faktiske Fetsund-observasjonen på
+    gyldighetstidspunktet (logged_at + horisont).
+
+    Returnerer en "lang" DataFrame med én rad per (loggrad × horisont) som har
+    en matchende observasjon:
+
+        logged_at, horizon_h, valid_time, predicted, lower68, upper68,
+        lower95, upper95, sigma, delta_vorma, windrisk, observed,
+        error, abs_error, in68, in95
+
+    lower95/upper95 rekonstrueres fra det loggede standardavviket:
+        lower95 = lower68 − 0.96·σ,  upper95 = upper68 + 0.96·σ
+    (følger direkte av at begge båndene deler samme risikoforskyvning).
+    Rader logget før σ ble innført får NaN der.
+
+    Tom DataFrame returneres hvis loggen eller observasjonene mangler - aldri
+    exception, siden dette kalles direkte fra appen.
+    """
+    horizons = horizons or EVAL_HORIZONS
+    cols = ['logged_at', 'horizon_h', 'valid_time', 'predicted', 'lower68',
+            'upper68', 'lower95', 'upper95', 'sigma', 'delta_vorma',
+            'windrisk', 'observed', 'error', 'abs_error', 'in68', 'in95']
+    if log_df is None or log_df.empty or 'logged_at' not in log_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    obs = _hourly_series(fetsund_df)
+    if obs is None or obs.empty:
+        return pd.DataFrame(columns=cols)
+
+    log = log_df.copy()
+    log['logged_at'] = pd.to_datetime(log['logged_at'], errors='coerce', utc=True)
+    log = log.dropna(subset=['logged_at'])
+    if log.empty:
+        return pd.DataFrame(columns=cols)
+
+    obs_times = obs.index
+    rows = []
+    for _, r in log.iterrows():
+        t0 = r['logged_at']
+        for h in horizons:
+            pred = _to_num(r.get(f'predicted_h{h}'))
+            if not np.isfinite(pred):
+                continue
+            valid = (t0 + pd.Timedelta(hours=h)).as_unit('ns')
+            if valid > obs_times.max() or valid < obs_times.min():
+                continue
+            pos = obs_times.get_indexer([valid], method='nearest')[0]
+            if pos < 0:
+                continue
+            t_obs = obs_times[pos]
+            if abs((t_obs - valid).total_seconds()) > tolerance_h * 3600:
+                continue
+            observed = float(obs.iloc[pos])
+            if not np.isfinite(observed):
+                continue
+
+            lo68  = _to_num(r.get(f'lower68_h{h}'))
+            hi68  = _to_num(r.get(f'upper68_h{h}'))
+            sigma = _to_num(r.get(f'sigma_h{h}'))
+            lo95  = lo68 - 0.96 * sigma if np.isfinite(sigma) and np.isfinite(lo68) else float('nan')
+            hi95  = hi68 + 0.96 * sigma if np.isfinite(sigma) and np.isfinite(hi68) else float('nan')
+
+            rows.append({
+                'logged_at':   t0,
+                'horizon_h':   int(h),
+                'valid_time':  valid,
+                'predicted':   pred,
+                'lower68':     lo68,
+                'upper68':     hi68,
+                'lower95':     lo95,
+                'upper95':     hi95,
+                'sigma':       sigma,
+                'delta_vorma': _to_num(r.get(f'delta_vorma_h{h}')),
+                'windrisk':    r.get(f'windrisk_h{h}'),
+                'observed':    observed,
+                'error':       pred - observed,
+                'abs_error':   abs(pred - observed),
+                'in68': (bool(lo68 <= observed <= hi68)
+                         if np.isfinite(lo68) and np.isfinite(hi68) else None),
+                'in95': (bool(lo95 <= observed <= hi95)
+                         if np.isfinite(lo95) and np.isfinite(hi95) else None),
+            })
+
+    return pd.DataFrame(rows, columns=cols)
+
+
+def summarize_prediction_skill(eval_df):
+    """
+    Oppsummerer evaluate_prediction_log() per horisont.
+
+    Returnerer DataFrame med: horizon_h, n, mae, bias, rmse, p90_abs,
+    coverage68, coverage95, sigma_mean, sigma_implied.
+
+    `sigma_implied` er standardavviket til de faktiske residualene. Sammenlignet
+    med `sigma_mean` (det modellen SA at usikkerheten var) forteller den om
+    båndene er for smale eller for vide - og gir tallet SIGMA_BASE /
+    SIGMA_PER_DELTA skal kalibreres mot.
+    """
+    empty = pd.DataFrame(columns=['horizon_h', 'n', 'mae', 'bias', 'rmse',
+                                  'p90_abs', 'coverage68', 'coverage95',
+                                  'sigma_mean', 'sigma_implied'])
+    if eval_df is None or eval_df.empty:
+        return empty
+
+    out = []
+    for h, g in eval_df.groupby('horizon_h'):
+        e = g['error'].dropna()
+        if e.empty:
+            continue
+        c68 = g['in68'].dropna()
+        c95 = g['in95'].dropna()
+        sg  = g['sigma'].dropna()
+        out.append({
+            'horizon_h':     int(h),
+            'n':             int(len(e)),
+            'mae':           float(e.abs().mean()),
+            'bias':          float(e.mean()),
+            'rmse':          float(np.sqrt((e ** 2).mean())),
+            'p90_abs':       float(e.abs().quantile(0.90)),
+            'coverage68':    float(c68.mean()) if len(c68) else float('nan'),
+            'coverage95':    float(c95.mean()) if len(c95) else float('nan'),
+            'sigma_mean':    float(sg.mean()) if len(sg) else float('nan'),
+            'sigma_implied': float(e.std(ddof=1)) if len(e) > 1 else float('nan'),
+        })
+    return pd.DataFrame(out).sort_values('horizon_h').reset_index(drop=True) if out else empty
+
+
+def prediction_history_series(log_df, horizon_h=24):
+    """
+    Henter ut «hva modellen sa {horizon_h} timer i forveien», som en tidsserie
+    på gyldighetstidspunktet. Brukes til å tegne den stiplede historikklinjen
+    i temperaturgrafen ved siden av den faktisk observerte kurven.
+
+    Returnerer DataFrame med kolonnene time, predicted, lower68, upper68.
+    """
+    cols = ['time', 'predicted', 'lower68', 'upper68']
+    if log_df is None or log_df.empty or 'logged_at' not in log_df.columns:
+        return pd.DataFrame(columns=cols)
+    col = f'predicted_h{horizon_h}'
+    if col not in log_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    d = log_df.copy()
+    d['time'] = (pd.to_datetime(d['logged_at'], errors='coerce', utc=True)
+                 + pd.Timedelta(hours=horizon_h))
+    d['predicted'] = d[col].map(_to_num)
+    d['lower68']   = d.get(f'lower68_h{horizon_h}', pd.Series(index=d.index)).map(_to_num)
+    d['upper68']   = d.get(f'upper68_h{horizon_h}', pd.Series(index=d.index)).map(_to_num)
+    d = (d.dropna(subset=['time', 'predicted'])
+           .sort_values('time')
+           .drop_duplicates(subset='time', keep='last'))
+    return d[cols].reset_index(drop=True)
+
+
 def calculate_event_date(year):
     """Beregner dato for første lørdag i august."""
     first_day   = datetime(year, EVENT_MONTH, 1)
@@ -669,88 +1010,9 @@ def calculate_event_date(year):
     return pd.Timestamp(event_date).tz_localize('Europe/Oslo').tz_convert('UTC')
 
 
-def circular_mean_deg(series):
-    """
-    Sirkulært gjennomsnitt av kompasskurser i grader.
-
-    Aritmetisk snitt av kurser er feil: mean([350, 10]) = 180 (sør) når det
-    korrekte svaret er 0 (nord). Denne feilen gjorde at dagtabellen kunne vise
-    "204° (SV)" for et døgn der ingen enkelttime lå i SE/S-sektoren.
-    """
-    a = pd.to_numeric(pd.Series(series), errors='coerce').dropna().values
-    if len(a) == 0:
-        return float('nan')
-    rad = np.deg2rad(a)
-    ang = np.rad2deg(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean()))
-    return float(ang % 360)
-
-
-def circular_concentration(series):
-    """
-    Resultantlengde R ∈ [0, 1] for kursene. R ≈ 1 = stabil retning,
-    R ≈ 0 = retningen snurrer rundt og et døgnmiddel er meningsløst.
-    """
-    a = pd.to_numeric(pd.Series(series), errors='coerce').dropna().values
-    if len(a) == 0:
-        return float('nan')
-    rad = np.deg2rad(a)
-    return float(np.hypot(np.sin(rad).mean(), np.cos(rad).mean()))
-
-
 def wind_rose_label(degrees):
     dirs = ['N', 'NØ', 'Ø', 'SØ', 'S', 'SV', 'V', 'NV']
     return dirs[round(degrees / 45) % 8]
-
-
-# August-klimatologi for vannføring ved Ertesekken (m³/s), jul–aug 2015–2025.
-# Brukes til å sette dagens Q i kontekst, siden transporttiden – og dermed hele
-# prediksjonsvinduet – skalerer som 1/Q.
-Q_CLIMATOLOGY_PCTL = {5: 232.0, 10: 258.0, 25: 331.0, 50: 505.0,
-                      75: 693.0, 90: 872.0, 95: 973.0}
-
-
-def discharge_percentile(q):
-    """Grov persentil for vannføring mot juli–august-klimatologi (Ertesekken)."""
-    if q is None or not np.isfinite(q):
-        return None
-    pts = sorted(Q_CLIMATOLOGY_PCTL.items(), key=lambda kv: kv[1])
-    xs = [v for _, v in pts]
-    ys = [k for k, _ in pts]
-    return float(np.clip(np.interp(q, xs, ys), 1, 99))
-
-
-def decision_window(event_datetime, q_used,
-                    window_hours=None, lead_hours=None,
-                    minnesund_to_svanefoss_km=22.0):
-    """
-    Tidsvinduet for VINDPÅDRIV som faktisk påvirker temperaturen på stevnedagen.
-
-    E-kurven plottes på kalenderakse, men vinden som bestemmer vanntemperaturen
-    ved målet virket flere døgn tidligere. Ved lav vannføring er forskjellen
-    dramatisk: Q = 204 m³/s gir ~48 t transport Svanefoss→Fetsund mot ~22 t ved
-    Q = 450. Uten dette vinduet er det lett å tolke en E-topp på selve
-    stevnedagen som en risiko – den påvirker i realiteten vannet 2–3 døgn etter.
-
-    Returnerer (t_start, t_slutt) i UTC for det 48-timers vinduet, samt
-    total forsinkelse i timer.
-    """
-    window_hours = window_hours or WIND_WINDOW_HOURS
-    lead_hours   = lead_hours   or WIND_LEAD_HOURS
-    q = float(q_used) if q_used and np.isfinite(q_used) else FALLBACK_DISCHARGE
-    q = max(q, 1.0)
-
-    # Svanefoss→Fetsund er kalibrert (TRANSPORT_COEFF). Mjøsa(Minnesund)→Svanefoss
-    # skaleres fra samme km-spesifikke koeffisient: 22,0 km av 45,0 km.
-    k_minnesund = TRANSPORT_COEFF * (minnesund_to_svanefoss_km / 45.0)
-    t_transport = (TRANSPORT_COEFF + k_minnesund) / q
-    total_lag   = t_transport + lead_hours
-
-    if event_datetime.tzinfo is None:
-        event_datetime = event_datetime.replace(
-            tzinfo=pd.Timestamp.now(tz='UTC').tzinfo)
-    t_end   = event_datetime - timedelta(hours=total_lag)
-    t_start = t_end - timedelta(hours=window_hours)
-    return t_start, t_end, total_lag, t_transport
 
 
 def build_wind_energy_series(frost_df, forecast_df,
@@ -783,43 +1045,21 @@ def build_wind_energy_series(frost_df, forecast_df,
     if 'southerly_wind' not in df.columns:
         df = add_southerly_component(df)
 
+    df['dt'] = df['time'].diff().dt.total_seconds().div(3600).fillna(1.0).clip(lower=0.5, upper=7.0)
+    df['is_ses']    = ((df['wind_direction'] >= WIND_SECTOR_MIN) &
+                       (df['wind_direction'] <= WIND_SECTOR_MAX))
+    df['v_ses']     = np.where(df['is_ses'], df['wind_speed'], 0.0)
+    df['e_contrib'] = df['v_ses'] * df['dt']
+
     # Dedupliser tidsstempler (kan oppstå i overlapp mellom Frost-obs og Met.no-prognose).
     # Behold siste rad per tidsstempel; obs ble lagt inn først og sort er stabil,
     # så 'last' gir faktisk observasjonen forrang fremfor prognose.
     df = df.drop_duplicates(subset='time', keep='last').reset_index(drop=True)
 
-    # ── Uniformt 1-timers grid ──────────────────────────────────────────────
-    # Frost leverer timesverdier, Locationforecast timesverdier de første ~2,5
-    # døgnene og deretter 6-timers INSTANTANverdier. Å vekte en instantanverdi
-    # med dt = 6 antar at vinden holdt seg der i seks timer. For en intermitterende
-    # retningsserie gir det stor varians og systematisk overestimering når en
-    # enkeltprøve treffer en SE/S-episode. Vi interpolerer i stedet til 1 t.
-    # Retning må interpoleres sirkulært (via sin/cos), ellers gir 350° → 10°
-    # et sveip gjennom hele sørsektoren som ikke har skjedd.
-    g = df.set_index('time').sort_index()
-    rad = np.deg2rad(pd.to_numeric(g['wind_direction'], errors='coerce'))
-    g['_sin'], g['_cos'] = np.sin(rad), np.cos(rad)
-    grid = pd.date_range(g.index.min(), g.index.max(),
-                         freq=f'{int(ENERGY_GRID_HOURS)}h', tz=g.index.tz)
-    gi = (g[['wind_speed', '_sin', '_cos']]
-          .reindex(g.index.union(grid))
-          .interpolate(method='time', limit_direction='both')
-          .reindex(grid))
-    gi['wind_direction'] = (np.rad2deg(np.arctan2(gi['_sin'], gi['_cos']))) % 360
-    gi['is_forecast'] = (g['is_forecast'].reindex(g.index.union(grid))
-                         .ffill().bfill().reindex(grid).astype(bool))
-    gi['dt'] = ENERGY_GRID_HOURS
-    gi['is_ses'] = ((gi['wind_direction'] >= WIND_SECTOR_MIN) &
-                    (gi['wind_direction'] <= WIND_SECTOR_MAX))
-    gi['v_ses'] = np.where(gi['is_ses'], gi['wind_speed'], 0.0)
-    gi['e_contrib'] = gi['v_ses'] * gi['dt']
-
-    df_idx = gi.drop(columns=['_sin', '_cos'])
-    # E_phys = fysiske m·h. E_raw = kalibreringsenhet (se ENERGY_CALIB_DT_HOURS).
-    df_idx['E_phys'] = (df_idx['e_contrib']
-                        .rolling(f'{window_hours}h', min_periods=1)
-                        .sum())
-    df_idx['E_raw'] = df_idx['E_phys'] / ENERGY_CALIB_DT_HOURS
+    df_idx = df.set_index('time')
+    df_idx['E_raw'] = (df_idx['e_contrib']
+                       .rolling(f'{window_hours}h', min_periods=1)
+                       .sum())
 
     # shift(freq=...) krever unik datetimeindex. Etter dedup er dette garantert,
     # men som ekstra sikkerhet faller vi tilbake til integer-shift ved ValueError.
@@ -830,16 +1070,9 @@ def build_wind_energy_series(frost_df, forecast_df,
         n_shift   = max(1, round(lead_hours / median_dt))
         df_idx['E'] = df_idx['E_raw'].shift(n_shift).round(2)
 
-    try:
-        df_idx['E_phys'] = df_idx['E_phys'].shift(freq=f'{lead_hours}h')
-    except ValueError:
-        df_idx['E_phys'] = df_idx['E_phys'].shift(int(lead_hours / ENERGY_GRID_HOURS))
-
     df = df_idx[['wind_speed', 'wind_direction', 'is_forecast',
-                 'v_ses', 'e_contrib', 'dt', 'E', 'E_phys']].reset_index()
-    df = df.rename(columns={'index': 'time'})
+                 'v_ses', 'e_contrib', 'dt', 'E']].reset_index()
     df['E'] = df['E'].fillna(0.0)
-    df['E_phys'] = df['E_phys'].fillna(0.0).round(2)
 
     now_utc  = pd.Timestamp.now(tz='UTC')
     max_fc_h = 120.0
@@ -849,7 +1082,7 @@ def build_wind_energy_series(frost_df, forecast_df,
     if fc_mask.any():
         h_ahead = ((df.loc[fc_mask, 'time'] - now_utc)
                    .dt.total_seconds().div(3600).clip(lower=0).values)
-        unc = (12.0 / ENERGY_CALIB_DT_HOURS) * np.sqrt(h_ahead / max_fc_h)
+        unc = 12.0 * np.sqrt(h_ahead / max_fc_h)
         df.loc[fc_mask, 'E_upper'] = np.round(df.loc[fc_mask, 'E'].values + unc, 2)
         df.loc[fc_mask, 'E_lower'] = np.round(
             np.maximum(0, df.loc[fc_mask, 'E'].values - unc), 2)
@@ -857,55 +1090,116 @@ def build_wind_energy_series(frost_df, forecast_df,
 
 
 def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
-                           hours_ahead=120, step_h=3, energy_df=None):
+                           glomma_q_df=None, hours_ahead=120, step_h=3,
+                           energy_df=None, mode=None, now=None):
     """
-    Beregner tidsserie for predikert temperatur ved Fløter'n / Fetsund
-    med usikkerhetsintervaller.
+    Tidsserie for predikert temperatur ved Fløter'n / Fetsund med
+    usikkerhetsintervaller.
 
-    Modell: T_pred(t) = fetsund_baseline + vorma_anomaly(t - travel_h) × κ
-    Usikkerhet: lav og tilnærmet flat innenfor datahorisonten (travel_h, ekte
-    Vorma-observasjoner - kun κ/transporttid-residual, MODEL_SIGMA_DATA), vokser
-    deretter med √(ekstrapoleringstid) mot MODEL_SIGMA og videre etter hvert som
-    vi går utover datahorisonten uten ny data.
+    ── Modell (FORECAST_MODE = 'increment', standard) ───────────────────────
+        T(t+h) = T_Fetsund(nå) + η·f · [ T_Vorma(t_kilde) − T_Vorma(t_ref) ]
 
-    Hvis energy_df (fra build_wind_energy_series) sendes inn, justeres KI-båndet
-    innenfor WIND_RISK_HORIZON_HOURS basert på forventet SE/S-vindenergi:
-    sentralestimatet ('predicted') røres IKKE, siden vind-magnitude-sammenhengen
-    er for svak (R² ≈ 0.08) til å brukes som punktestimat - se WIND_ANOMALY_SLOPE.
-    I stedet utvides/skjeves nedre KI-grense for å reflektere økt nedsiderisiko.
+        t_ref   = nå − transporttid   (vannet som ankommer Fetsund nå)
+        t_kilde = nå + h − transporttid (vannet som ankommer om h timer)
+        f       = Q_Vorma / (Q_Vorma + Q_Glomma), fra sist målte vannføring
+        η       = DILUTION_ETA_INCREMENT
+
+    Formen predikerer ENDRINGEN i stedet for nivået, og er derfor immun mot
+    baseline-kontaminering: den gamle nivåformen la Vorma-anomalien oppå en
+    Fetsund-baseline som allerede inneholdt den samme kaldpulsen, og
+    dobbelttalte den. Validert mot 10 552 timer jul-aug 2017-2025:
+
+        nivåform (produksjon t.o.m. v1.6)   MAE 0.84 °C
+        ren persistens (ingen modell)        MAE 0.74 °C
+        inkrementform                        MAE 0.54 °C
+
+    ── Modell (mode='level') ────────────────────────────────────────────────
+        T(t+h) = Fetsund-baseline + κ·(T_Vorma(t_kilde) − Vorma-baseline)
+        Den opprinnelige formen. Brukes automatisk hvis Fetsund-data mangler
+        eller er eldre enn FETSUND_ANCHOR_MAX_AGE_H, og kan tvinges fram ved
+        å sette FORECAST_MODE = 'level'.
+
+    ── Usikkerhet ───────────────────────────────────────────────────────────
+        σ_data = √( (SIGMA_BASE·ramp)² + (SIGMA_PER_DELTA·|ΔT_Vorma|)² )
+        σ      = √( σ_data² + σ_ekstrap² ),
+        σ_ekstrap = MODEL_SIGMA_ASYMPTOTE·√(1 − e^(−ekstrapolering/τ))
+    Heteroskedastisk: båndet utvides automatisk når en stor temperaturendring
+    er under transport. Se kommentaren ved SIGMA_BASE.
+
+    Hvis energy_df sendes inn, skjeves og utvides båndet innenfor
+    WIND_RISK_HORIZON_HOURS basert på prognosert SE/S-vindenergi.
+    Sentralestimatet røres ikke (R² ≈ 0.08 - for svakt til punktestimat).
+
+    `now` overstyrer «nåtidspunktet». Standard er faktisk klokkeslett; sett den
+    eksplisitt for å BACKTESTE modellen mot historikk. Uten dette argumentet er
+    funksjonen umulig å etterprøve, siden nåtiden var hardkodet internt.
+
+    Returnerte kolonner: time, predicted, lower_68, upper_68, lower_95,
+    upper_95, delta_vorma, sigma, kappa, mode, wind_E_forecast,
+    wind_risk_level, is_extrapolated.
     """
-    if vorma_df is None or vorma_df.empty:
+    sv = _hourly_series(vorma_df)
+    if sv is None or sv.empty:
         return pd.DataFrame()
 
+    now_utc = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    if now_utc.tz is None:
+        now_utc = now_utc.tz_localize('UTC')
+    now_utc = now_utc.tz_convert('UTC').as_unit('ns')
     _, travel_h, _, _ = calculate_travel_time(discharge_df)
+    travel_h = max(1.0, float(travel_h))
 
-    vorma_df = vorma_df.copy()
-    vorma_df['time'] = pd.to_datetime(vorma_df['time'])
-    if vorma_df['time'].dt.tz is None:
-        vorma_df['time'] = vorma_df['time'].dt.tz_localize('UTC')
+    # ── Uttynning fra sist målte vannføring ──────────────────────────────────
+    kappa_inc, f_mix, kappa_src = dilution_kappa(discharge_df, glomma_q_df,
+                                                 mode='increment')
+    kappa_lvl, _, _             = dilution_kappa(discharge_df, glomma_q_df,
+                                                 mode='episode')
 
+    sv_last_t   = sv.index.max()
+    sv_last_val = float(sv.loc[sv_last_t])
+    sv_base = float(sv[sv.index >= sv_last_t -
+                       pd.Timedelta(hours=VORMA_BASELINE_HOURS)].median())
+
+    def _vorma_at(t):
+        """T_Vorma på tidspunkt t. Utenfor dataserien: eksponentiell relaksasjon
+        av anomalien mot 72t-medianen (e-foldingstid VORMA_RELAX_HOURS)."""
+        t = pd.Timestamp(t).as_unit('ns')
+        if t <= sv_last_t and t >= sv.index.min():
+            v = sv.asof(t)
+            if pd.notna(v):
+                return float(v), False
+        if t < sv.index.min():
+            return float(sv.iloc[0]), True
+        extrap_h = (t - sv_last_t).total_seconds() / 3600.0
+        return (sv_base + (sv_last_val - sv_base) *
+                float(np.exp(-extrap_h / VORMA_RELAX_HOURS))), True
+
+    # ── Anker: Fetsund nå (robust 3t-median, ikke ett enkelt punkt) ──────────
+    anchor      = None
+    anchor_age  = None
     fetsund_baseline = None
-    last_fetsund_obs = None
-    if fetsund_df is not None and not fetsund_df.empty:
-        fe = fetsund_df.copy()
-        fe['time'] = pd.to_datetime(fe['time'])
-        if fe['time'].dt.tz is None:
-            fe['time'] = fe['time'].dt.tz_localize('UTC')
-        latest_fe = fe['time'].max()
-        recent_fe = fe[fe['time'] >= latest_fe - timedelta(hours=48)]
-        fetsund_baseline = recent_fe['value'].median()
-        last_fetsund_obs = fe.iloc[-1]['value']
+    fe_h = _hourly_series(fetsund_df)
+    if fe_h is not None and not fe_h.empty:
+        fe_last_t = fe_h.index.max()
+        anchor_age = (now_utc - fe_last_t).total_seconds() / 3600.0
+        anchor = float(fe_h[fe_h.index >= fe_last_t -
+                            pd.Timedelta(hours=FETSUND_ANCHOR_HOURS)].median())
+        fetsund_baseline = float(fe_h[fe_h.index >= fe_last_t -
+                                      pd.Timedelta(hours=48)].median())
 
-    if fetsund_baseline is None:
-        vorma_base_val   = vorma_df.tail(48)['value'].mean()
-        fetsund_baseline = vorma_base_val + 1.5
-        last_fetsund_obs = fetsund_baseline
+    use_mode = mode or FORECAST_MODE
+    if (anchor is None or not np.isfinite(anchor)
+            or anchor_age is None or anchor_age > FETSUND_ANCHOR_MAX_AGE_H):
+        use_mode = 'level'
+    if fetsund_baseline is None or not np.isfinite(fetsund_baseline):
+        fetsund_baseline = sv_base + 1.5
+    if anchor is None or not np.isfinite(anchor):
+        anchor = fetsund_baseline
 
-    vorma_baseline = vorma_df[
-        vorma_df['time'] >= vorma_df['time'].max() - timedelta(hours=48)
-    ]['value'].mean()
+    # Referansepunkt: vannet som ankommer Fetsund akkurat nå
+    sv_ref, _ = _vorma_at(now_utc - pd.Timedelta(hours=travel_h))
 
-    # ── Forbered vindenergi-prognose for oppslag (E mot tid) ───────────────────
+    # ── Vindenergi-prognose for oppslag ─────────────────────────────────────
     energy_lookup = None
     if energy_df is not None and not energy_df.empty:
         energy_lookup = energy_df[['time', 'E', 'is_forecast']].dropna(subset=['time']).copy()
@@ -914,51 +1208,44 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             energy_lookup['time'] = energy_lookup['time'].dt.tz_localize('UTC')
         energy_lookup = energy_lookup.sort_values('time').reset_index(drop=True)
 
-    now_utc = pd.Timestamp.now(tz='UTC')
     rows = []
+    for h_step in range(0, int(hours_ahead) + 1, int(step_h)):
+        t_fut  = now_utc + timedelta(hours=h_step)
+        t_src  = t_fut - timedelta(hours=travel_h)
+        sv_src, is_extrap = _vorma_at(t_src)
 
-    for h_step in range(0, hours_ahead + 1, step_h):
-        t_fut    = now_utc + timedelta(hours=h_step)
-        h_elapsed = h_step
-        t_vorma  = t_fut - timedelta(hours=travel_h)
-
-        close = vorma_df[abs(vorma_df['time'] - t_vorma) <= timedelta(hours=2)]
-        if not close.empty:
-            anomaly = close.iloc[-1]['value'] - vorma_baseline
+        if use_mode == 'increment':
+            d_vorma = sv_src - sv_ref
+            pred    = anchor + kappa_inc * d_vorma
+            k_used  = kappa_inc
         else:
-            last_anomaly = vorma_df.iloc[-1]['value'] - vorma_baseline
-            extrap_h     = max(0.0,
-                               (t_vorma - vorma_df['time'].max()).total_seconds() / 3600)
-            anomaly = last_anomaly * np.exp(-extrap_h / 36.0)
+            d_vorma = sv_src - sv_base
+            raw     = fetsund_baseline + d_vorma * kappa_lvl
+            # Behold den myke overgangen fra nå-tilstand for nivåformen
+            alpha   = min(1.0, h_step / travel_h)
+            pred    = anchor * (1.0 - alpha) + raw * alpha
+            k_used  = kappa_lvl
 
-        raw_pred = fetsund_baseline + anomaly * TEMPERATURE_SURVIVAL
-        alpha    = min(1.0, h_elapsed / travel_h)
-        pred     = last_fetsund_obs * (1.0 - alpha) + raw_pred * alpha
+        # ── Usikkerhet ──────────────────────────────────────────────────────
+        ramp    = min(1.0, h_step / travel_h)
+        extrap  = max(0.0, h_step - travel_h)
+        sigma_data = max(SIGMA_FLOOR,
+                         float(np.hypot(SIGMA_BASE * ramp,
+                                        SIGMA_PER_DELTA * abs(d_vorma))))
+        sigma_extrap = MODEL_SIGMA_ASYMPTOTE * float(
+            np.sqrt(1.0 - np.exp(-extrap / SIGMA_EXTRAP_TAU)))
+        sigma = float(np.hypot(sigma_data, sigma_extrap))
 
-        ramp   = min(1.0, h_elapsed / travel_h)
-        extrap = max(0.0, h_elapsed - travel_h)
-        # To regimer: (1) innenfor datahorisonten kjenner vi den faktiske
-        # Vorma-temperaturen på vei nedover elva - usikkerheten er kun
-        # κ/transporttid-modellens residual (MODEL_SIGMA_DATA), og vokser svakt
-        # fra ~0 (h=0, ren rapportering av nå-tilstand) til MODEL_SIGMA_DATA
-        # (h=travel_h). (2) Utover dette er det ren ekstrapolering uten ny data,
-        # og usikkerheten vokser videre mot/forbi MODEL_SIGMA - her dominerer
-        # værprognosen, og det er her vindrisiko-justeringen under slår inn.
-        sigma  = (MODEL_SIGMA_DATA * ramp
-                  + (MODEL_SIGMA - MODEL_SIGMA_DATA) * np.sqrt(extrap / 24.0))
-
-        # ── Vindrisiko-justering (kun innenfor pålitelig prognosehorisont) ─────
-        e_fc        = None
-        risk_level  = None
-        sigma_mult  = 1.0
-        risk_shift  = 0.0
-        if energy_lookup is not None and h_elapsed <= WIND_RISK_HORIZON_HOURS:
+        # ── Vindrisiko-justering (kun innenfor pålitelig prognosehorisont) ──
+        e_fc, risk_level = None, None
+        sigma_mult, risk_shift = 1.0, 0.0
+        if energy_lookup is not None and h_step <= WIND_RISK_HORIZON_HOURS:
             nearest = energy_lookup.iloc[
                 (energy_lookup['time'] - t_fut).abs().argsort()[:1]
             ]
             if not nearest.empty and abs(
                 (nearest.iloc[0]['time'] - t_fut).total_seconds()
-            ) <= 5400:  # 90 min toleranse for matching
+            ) <= 5400:  # 90 min toleranse
                 e_fc = float(nearest.iloc[0]['E'])
                 if e_fc >= ENERGY_THRESHOLD:
                     sigma_mult, risk_level = WIND_SIGMA_MULT_ALARM, 'alarm'
@@ -978,11 +1265,20 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             'upper_68':        round(min(pred + sigma_eff,                     TEMP_HIST_UPPER), 2),
             'lower_95':        round(max(pred + risk_shift - 1.96 * sigma_eff, TEMP_HIST_LOWER), 2),
             'upper_95':        round(min(pred + 1.96 * sigma_eff,              TEMP_HIST_UPPER), 2),
+            'delta_vorma':     round(d_vorma, 2),
+            'sigma':           round(sigma_eff, 2),
+            'kappa':           round(k_used, 3),
+            'mode':            use_mode,
+            'is_extrapolated': bool(is_extrap),
             'wind_E_forecast': round(e_fc, 1) if e_fc is not None else None,
             'wind_risk_level': risk_level,
         })
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    out.attrs['mixing_fraction'] = round(f_mix, 3)
+    out.attrs['kappa_source']    = kappa_src
+    out.attrs['travel_hours']    = travel_h
+    return out
 
 
-__all__ = ['NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'build_wind_energy_series', 'circular_mean_deg', 'circular_concentration', 'decision_window', 'discharge_percentile', 'ENERGY_CALIB_DT_HOURS', 'ENERGY_GRID_HOURS', 'Q_CLIMATOLOGY_PCTL', 'build_fetsund_forecast', 'read_prediction_log', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
+__all__ = ['NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'FORECAST_MODE', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
