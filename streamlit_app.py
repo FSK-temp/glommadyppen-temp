@@ -53,6 +53,32 @@ _REQUIRED_CORE_ATTRS = [
 ]
 
 
+def _core_fingerprint():
+    """
+    Identifiserer NØYAKTIG hvilken glommadyppen_core.py som faktisk er lastet.
+
+    Ligger det to kopier av filen i repoet, eller bygger Streamlit Cloud fra en
+    annen branch enn man tror, sier versjonsnummeret alene ingenting om hvor
+    filen kom fra. Stien gjør det.
+    """
+    import os
+    from datetime import datetime as _dt
+    info = {"sti": getattr(_core, "__file__", "ukjent")}
+    try:
+        stt = os.stat(info["sti"])
+        info["størrelse"] = f"{stt.st_size} byte"
+        info["endret"] = _dt.fromtimestamp(stt.st_mtime).strftime("%d.%m.%Y %H:%M")
+        with open(info["sti"], encoding="utf-8") as fh:
+            lines = fh.readlines()
+        info["linjer"] = str(len(lines))
+        hit = next((f"linje {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
+                    if ln.startswith("CORE_VERSION")), None)
+        info["CORE_VERSION"] = hit or "★ finnes ikke i filen ★"
+    except OSError as e:
+        info["lesefeil"] = str(e)
+    return info
+
+
 def _check_core_version():
     """Stopper appen med en lesbar melding hvis kjernemodulen er utdatert."""
     missing = [n for n in _REQUIRED_CORE_ATTRS if not hasattr(_core, n)]
@@ -72,23 +98,26 @@ def _check_core_version():
     st.error(
         f"**glommadyppen_core.py er ikke i synk med streamlit_app.py.**\n\n"
         f"Appen krever kjerneversjon `{REQUIRED_CORE_VERSION}`, men fant "
-        f"`{found or 'ingen versjon (eldre enn 1.7.0)'}`.\n\n"
-        "Begge filene må rulles ut samtidig. Last opp den oppdaterte "
-        "`glommadyppen_core.py` til repoet og la Streamlit Cloud bygge på nytt.",
+        f"`{found or 'ingen versjon (eldre enn 1.7.0)'}`.",
         icon="🔧",
     )
+
+    st.markdown("**Dette er filen appen faktisk leste:**")
+    st.code("\n".join(f"{k:14s} {v}" for k, v in _core_fingerprint().items()),
+            language=None)
+    st.markdown(
+        "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
+        "`CORE_VERSION = \"1.7.0\"` på linje 30 og er cirka 1 280 linjer lang. "
+        "Ligger det flere kopier i repoet, er det stien over som gjelder."
+    )
+
     if missing:
-        with st.expander("Hva mangler i kjernemodulen"):
-            st.write(
-                f"{len(missing)} navn som appen bruker finnes ikke i den "
-                "installerte `glommadyppen_core.py`:"
-            )
+        with st.expander(f"{len(missing)} navn mangler i kjernemodulen"):
             st.code("\n".join(missing))
             if not sig_ok:
-                st.write(
+                st.markdown(
                     "I tillegg mangler `build_fetsund_forecast()` argumentet "
-                    "`glomma_q_df`, som er nødvendig for at uttynningen skal "
-                    "beregnes fra vannføringen."
+                    "`glomma_q_df`."
                 )
     st.stop()
 
@@ -1701,6 +1730,7 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
+        st.caption(f"App 1.7.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
