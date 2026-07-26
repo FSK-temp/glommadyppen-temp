@@ -40,11 +40,11 @@ st.set_page_config(
 # melding om nøyaktig hva som er ute av synk.
 # ============================================================================
 
-REQUIRED_CORE_VERSION = "1.8.0"
+REQUIRED_CORE_VERSION = "1.9.0"
 
 _REQUIRED_CORE_ATTRS = [
     # v1.7 - dynamisk uttynning og robusthet
-    "CORE_VERSION", "undisturbed_baseline", "relaxation_factor", "dilution_kappa", "mixing_fraction", "safe_discharge",
+    "CORE_VERSION", "WIND_RISK_FADE_HOURS", "undisturbed_baseline", "relaxation_factor", "dilution_kappa", "mixing_fraction", "safe_discharge",
     "SEICHE_HISTORY_HOURS", "SIGMA_BASE", "SIGMA_PER_DELTA",
     "MODEL_SIGMA_ASYMPTOTE", "VORMA_RELAX_HOURS", "FORECAST_MODE",
     # v1.7 - etterprøving av prediksjonsloggen
@@ -107,7 +107,7 @@ def _check_core_version():
             language=None)
     st.markdown(
         "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
-        "`CORE_VERSION = \"1.8.0\"` på linje 30 og er cirka 1 340 linjer lang. "
+        "`CORE_VERSION = \"1.9.0\"` på linje 30 og er cirka 1 340 linjer lang. "
         "Ligger det flere kopier i repoet, er det stien over som gjelder."
     )
 
@@ -1243,19 +1243,17 @@ def page_prediksjon():
             "Vorma, er usikkerheten hvor KRAFTIG den slår ut – ikke om den kommer. "
             "Empirisk er responsen negativ i 0,1 % av tilfellene ved store anomalier, "
             "så båndet bygges av forsterkningskvantiler (κ × 0,4 til κ × 1,6) i stedet "
-            "for et symmetrisk ± σ. Utenfor datahorisonten er tillegget ensidig: en "
-            "ukjent framtidig oppvellingshendelse kan bare gjøre det kaldere. "
+            "for et symmetrisk ± σ. "
             f"**Frem til datahorisonten (+{travel_h_now:.0f} t)** er prediksjonen basert på "
-            "observert vann i Vorma. Bredden følger hvor stor temperaturendring som er "
-            f"under transport (σ = √({SIGMA_BASE}² + ({SIGMA_PER_DELTA}·|ΔT_Vorma|)²)) – "
-            "den er smal i rolige perioder og utvides automatisk når en kraftig kaldpuls "
-            "er på vei. **Etter datahorisonten** ekstrapoleres anomalien mot 72-timers "
-            f"medianen, og usikkerheten metter mot σ ≈ {MODEL_SIGMA_ASYMPTOTE} °C "
-            f"(kalibrert mot persistensfeilen ved Fetsund)"
+            "observert vann i Vorma. **Etter datahorisonten** relakserer anomalien mot "
+            f"et permanent restnivå ({100*RELAX_PERSISTENT:.0f} % av dybden står igjen), "
+            "og usikkerhetstillegget er ensidig – bredt nedover, smalt oppover – fordi "
+            "en ukjent framtidig oppvellingshendelse bare kan gjøre det kaldere"
             + (f"; maks i denne prognosen er σ = {_sig_max:.1f} °C. " if _sig_max else ". ")
-            + f"Innenfor vindrisiko-horisonten (+{WIND_RISK_HORIZON_HOURS} t) skjeves båndet "
-            "nedover dersom SE/S-vindvarselet overskrider advarsel- "
-            f"({ENERGY_WARN:.0f} m·h) eller alarmterskelen ({ENERGY_THRESHOLD:.0f} m·h)."
+            + "Vindrisikoen virker **kumulativt**: en vindtopp som har passert fortsetter "
+            "å holde båndet åpent nedover, i stedet for å slå av igjen når vinden løyer. "
+            f"Advarsel ved {ENERGY_WARN:.0f} m·h, alarm ved {ENERGY_THRESHOLD:.0f} m·h; "
+            f"etter +{WIND_RISK_HORIZON_HOURS} t tones justeringen jevnt ut."
         )
     else:
         st.warning("Ikke nok data for prognosevisning.")
@@ -1271,20 +1269,49 @@ def page_prediksjon():
             fc_e   = energy_df[ energy_df['is_forecast']]
             cur_E  = float(obs_e['E'].iloc[-1]) if not obs_e.empty else 0.0
             pct    = round(cur_E / ENERGY_THRESHOLD * 100)
-            fc_E   = float(fc_e['E'].iloc[-1])       if not fc_e.empty else cur_E
-            fc_Ehi = float(fc_e['E_upper'].max())    if not fc_e.empty else cur_E
+            # Vis TOPPEN i varselperioden, ikke siste punkt. Tidligere ble
+            # verdien hentet fra fc_e['E'].iloc[-1] - altså helt sist i
+            # varselet, ofte etter at vinden hadde løyet - mens advarselen ble
+            # utløst av maksimum over hele perioden. Det ga den selvmotsigende
+            # visningen "0.0 m·h ⚠️ Kan overskride terskel!".
+            if not fc_e.empty:
+                peak_i  = fc_e['E'].idxmax()
+                fc_E    = float(fc_e.loc[peak_i, 'E'])
+                fc_when = pd.to_datetime(fc_e.loc[peak_i, 'time'])
+                fc_Ehi  = float(fc_e['E_upper'].max())
+                fc_lbl  = fc_when.tz_convert('Europe/Oslo').strftime('%a %d.%m kl. %H')
+                days_to = (fc_when - pd.Timestamp.now(tz='UTC')).total_seconds() / 86400
+            else:
+                fc_E = fc_Ehi = cur_E
+                fc_lbl, days_to = None, None
 
             c1.metric("Kumulativ E nå",   f"{cur_E:.1f} m·h",
                       help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet")
             c2.metric("Andel av terskel", f"{pct} %",
                       help=f"{ENERGY_THRESHOLD:.0f} m·h = 100 % (AUC = 0.86)")
-            c3.metric("Prognosert E (dag +5)", f"{fc_E:.1f} m·h",
-                      delta="⚠️ Kan overskride terskel!" if fc_Ehi >= ENERGY_THRESHOLD else None,
-                      delta_color="inverse" if fc_Ehi >= ENERGY_THRESHOLD else "normal")
+
+            if fc_lbl:
+                if fc_E >= ENERGY_THRESHOLD:
+                    e_delta, e_col = "⚠️ Over alarmterskel", "inverse"
+                elif fc_Ehi >= ENERGY_THRESHOLD:
+                    e_delta, e_col = "⚠️ Kan nå alarmterskel", "inverse"
+                elif fc_E >= ENERGY_WARN:
+                    e_delta, e_col = "Over advarselnivå", "inverse"
+                else:
+                    e_delta, e_col = f"{fc_lbl}", "off"
+                c3.metric(f"Høyeste prognosert E (+{days_to:.0f} d)",
+                          f"{fc_E:.1f} m·h", delta=e_delta, delta_color=e_col,
+                          help=(f"Toppen i varselperioden, ventet {fc_lbl}. "
+                                f"Øvre usikkerhetsgrense {fc_Ehi:.1f} m·h. "
+                                f"Advarsel ved {ENERGY_WARN:.0f}, alarm ved "
+                                f"{ENERGY_THRESHOLD:.0f} m·h."))
+            else:
+                c3.metric("Høyeste prognosert E", "N/A",
+                          help="Ingen vindprognose tilgjengelig")
         else:
             c1.metric("Kumulativ E nå", "N/A")
             c2.metric("Andel av terskel", "N/A")
-            c3.metric("Prognosert E (dag +5)", "N/A")
+            c3.metric("Høyeste prognosert E", "N/A")
 
         if not weather_mjosa.empty:
             avg_ses = weather_mjosa.head(48)['southerly_wind'].mean()
@@ -1781,7 +1808,7 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
-        st.caption(f"App 1.8.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
+        st.caption(f"App 1.9.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
