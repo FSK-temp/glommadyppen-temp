@@ -32,6 +32,68 @@ st.set_page_config(
 )
 
 # ============================================================================
+# VERSJONSSJEKK AV KJERNEMODULEN
+# streamlit_app.py og glommadyppen_core.py må rulles ut sammen. Blir bare den
+# ene oppdatert, feiler appen med en NameError som Streamlit Cloud sladder
+# ("original error message is redacted to prevent data leaks") - praktisk talt
+# umulig å feilsøke fra brukersiden. Denne sjekken bytter den ut med en presis
+# melding om nøyaktig hva som er ute av synk.
+# ============================================================================
+
+REQUIRED_CORE_VERSION = "1.7.0"
+
+_REQUIRED_CORE_ATTRS = [
+    # v1.7 - dynamisk uttynning og robusthet
+    "CORE_VERSION", "dilution_kappa", "mixing_fraction", "safe_discharge",
+    "SEICHE_HISTORY_HOURS", "SIGMA_BASE", "SIGMA_PER_DELTA",
+    "MODEL_SIGMA_ASYMPTOTE", "VORMA_RELAX_HOURS", "FORECAST_MODE",
+    # v1.7 - etterprøving av prediksjonsloggen
+    "EVAL_HORIZONS", "evaluate_prediction_log", "summarize_prediction_skill",
+    "prediction_history_series",
+]
+
+
+def _check_core_version():
+    """Stopper appen med en lesbar melding hvis kjernemodulen er utdatert."""
+    missing = [n for n in _REQUIRED_CORE_ATTRS if not hasattr(_core, n)]
+    found   = getattr(_core, "CORE_VERSION", None)
+
+    sig_ok = True
+    try:
+        import inspect
+        sig_ok = 'glomma_q_df' in inspect.signature(
+            _core.build_fetsund_forecast).parameters
+    except (AttributeError, ValueError, TypeError):
+        sig_ok = False
+
+    if not missing and sig_ok and found == REQUIRED_CORE_VERSION:
+        return
+
+    st.error(
+        f"**glommadyppen_core.py er ikke i synk med streamlit_app.py.**\n\n"
+        f"Appen krever kjerneversjon `{REQUIRED_CORE_VERSION}`, men fant "
+        f"`{found or 'ingen versjon (eldre enn 1.7.0)'}`.\n\n"
+        "Begge filene må rulles ut samtidig. Last opp den oppdaterte "
+        "`glommadyppen_core.py` til repoet og la Streamlit Cloud bygge på nytt.",
+        icon="🔧",
+    )
+    if missing:
+        with st.expander("Hva mangler i kjernemodulen"):
+            st.write(
+                f"{len(missing)} navn som appen bruker finnes ikke i den "
+                "installerte `glommadyppen_core.py`:"
+            )
+            st.code("\n".join(missing))
+            if not sig_ok:
+                st.write(
+                    "I tillegg mangler `build_fetsund_forecast()` argumentet "
+                    "`glomma_q_df`, som er nødvendig for at uttynningen skal "
+                    "beregnes fra vannføringen."
+                )
+    st.stop()
+
+
+# ============================================================================
 # CONSTANTS AND CONFIGURATION
 # ============================================================================
 
@@ -1080,13 +1142,13 @@ def page_prediksjon():
             hcol1, _ = st.columns([1, 3])
             hist_h = hcol1.selectbox(
                 "Vis tidligere prediksjon med varsel",
-                options=list(EVAL_HORIZONS), index=0,
+                options=list(_core.EVAL_HORIZONS), index=0,
                 format_func=lambda h: f"{h} timer i forveien",
                 help=("Stiplet oransje linje viser hva modellen predikerte for hvert "
                       "tidspunkt, gitt så mange timer i forveien. Avstanden til den "
                       "heltrukne blå observasjonslinjen er treffsikkerheten."),
             )
-            hist_df = prediction_history_series(pred_log, hist_h)
+            hist_df = _core.prediction_history_series(pred_log, hist_h)
 
         fig_fc = _forecast_chart(fetsund_temp, forecast_df, travel_h_now,
                                  history_df=hist_df, history_horizon=hist_h)
@@ -1403,7 +1465,7 @@ def page_treffsikkerhet():
         st.error("Ingen Fetsund-observasjoner tilgjengelig – kan ikke etterprøve.")
         return
 
-    ev = evaluate_prediction_log(log, fetsund_obs)
+    ev = _core.evaluate_prediction_log(log, fetsund_obs)
     if ev.empty:
         _n = len(log)
         st.info(
@@ -1414,7 +1476,7 @@ def page_treffsikkerhet():
         )
         return
 
-    summary = summarize_prediction_skill(ev)
+    summary = _core.summarize_prediction_skill(ev)
 
     # ── Nøkkeltall ───────────────────────────────────────────────────────────
     st.header("Nøkkeltall")
@@ -1607,6 +1669,7 @@ def page_treffsikkerhet():
 # ============================================================================
 
 def main():
+    _check_core_version()
     _inject_mobile_css()
     # Navigasjonshint: vises kun på smale skjermer (CSS display:none på desktop)
     st.markdown(
