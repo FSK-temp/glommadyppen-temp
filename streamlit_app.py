@@ -78,7 +78,7 @@ st.set_page_config(
 # melding om nøyaktig hva som er ute av synk.
 # ============================================================================
 
-REQUIRED_CORE_VERSION = "1.9.0"
+REQUIRED_CORE_VERSION = "1.10.0"
 
 _REQUIRED_CORE_ATTRS = [
     # v1.7 - dynamisk uttynning og robusthet
@@ -88,6 +88,11 @@ _REQUIRED_CORE_ATTRS = [
     # v1.7 - etterprøving av prediksjonsloggen
     "EVAL_HORIZONS", "evaluate_prediction_log", "summarize_prediction_skill",
     "prediction_history_series",
+    # v1.10 - persentilbaserte vindenergiterskler
+    "ENERGY_PCTL_WARN", "ENERGY_PCTL_ALARM", "ENERGY_SOURCE_SCALE",
+    "ENERGY_REF_PCTL", "ENERGY_REF_MH", "energy_percentile",
+    "energy_from_percentile", "energy_risk_level", "estimate_energy_scale",
+    "WIND_ANOMALY_SLOPE_EFF",
 ]
 
 
@@ -158,7 +163,7 @@ def _check_core_version():
             language=None)
     st.markdown(
         "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
-        "`CORE_VERSION = \"1.9.0\"` på linje 30 og er cirka 1 340 linjer lang. "
+        "`CORE_VERSION = \"1.10.0\"` på linje 30 og er cirka 1 450 linjer lang. "
         "Ligger det flere kopier i repoet, er det stien over som gjelder."
     )
 
@@ -552,16 +557,24 @@ def _wind_energy_chart(energy_df,
     fig.add_hrect(y0=0, y1=ENERGY_WARN,
                   fillcolor='rgba(40,167,69,0.07)',  line_width=0, row=1, col=1)
 
+    # Tersklene merkes med BÅDE persentil og m·h. Persentilen er den styrende
+    # størrelsen; m·h står der fordi det er den som faktisk plottes, og fordi
+    # eldre logg og rapport oppgir absoluttverdier.
     fig.add_hline(y=ENERGY_THRESHOLD,
                   line_dash='dot', line_color='rgba(163,45,45,0.55)', line_width=1.2,
-                  annotation_text=f'{ENERGY_THRESHOLD:.0f} m·h – terskel',
+                  annotation_text=f'p{ENERGY_PCTL_ALARM:.0f} – alarm ({ENERGY_THRESHOLD:.0f} m·h)',
                   annotation_position='right', annotation_font_size=10,
                   annotation_font_color='rgba(163,45,45,0.75)', row=1, col=1)
     fig.add_hline(y=ENERGY_WARN,
                   line_dash='dot', line_color='rgba(186,117,23,0.45)', line_width=1.0,
-                  annotation_text=f'{ENERGY_WARN:.0f} m·h – advarsel',
+                  annotation_text=f'p{ENERGY_PCTL_WARN:.0f} – advarsel ({ENERGY_WARN:.0f} m·h)',
                   annotation_position='right', annotation_font_size=10,
                   annotation_font_color='rgba(186,117,23,0.70)', row=1, col=1)
+    fig.add_hline(y=WIND_ANOMALY_E_TYPISK,
+                  line_dash='dot', line_color='rgba(120,120,120,0.35)', line_width=1.0,
+                  annotation_text=f'p50 – normalt ({WIND_ANOMALY_E_TYPISK:.0f} m·h)',
+                  annotation_position='right', annotation_font_size=10,
+                  annotation_font_color='rgba(110,110,110,0.70)', row=1, col=1)
 
     if not fc.empty:
         t_fwd = list(fc['time'])
@@ -574,18 +587,25 @@ def _wind_energy_chart(energy_df,
             name='Usikkerhet (±1σ)', hoverinfo='skip',
         ), row=1, col=1)
 
+    # Persentil per punkt legges i customdata slik at hover viser klimatologisk
+    # plassering ved siden av absoluttverdien. Uten den må leseren selv vite at
+    # 90 m·h er sjeldent og 30 m·h er helt normalt.
     if not obs.empty:
+        obs['pctl'] = [energy_percentile(v) or 0.0 for v in obs['E']]
         fig.add_trace(go.Scatter(
             x=obs['time'], y=obs['E'], mode='lines', name='E (Frost-obs)',
-            line=dict(color='#185FA5', width=2),
-            hovertemplate='<b>E (obs)</b>: %{y:.1f} m·h<extra></extra>',
+            line=dict(color='#185FA5', width=2), customdata=obs['pctl'],
+            hovertemplate=('<b>E (obs)</b>: %{y:.1f} m·h'
+                           '<br>persentil: %{customdata:.0f}<extra></extra>'),
         ), row=1, col=1)
 
     if not fc.empty:
+        fc['pctl'] = [energy_percentile(v) or 0.0 for v in fc['E']]
         fig.add_trace(go.Scatter(
             x=fc['time'], y=fc['E'], mode='lines', name='E (Met.no-prognose)',
-            line=dict(color='#185FA5', width=2, dash='dash'),
-            hovertemplate='<b>E (varsel)</b>: %{y:.1f} m·h<extra></extra>',
+            line=dict(color='#185FA5', width=2, dash='dash'), customdata=fc['pctl'],
+            hovertemplate=('<b>E (varsel)</b>: %{y:.1f} m·h'
+                           '<br>persentil: %{customdata:.0f}<extra></extra>'),
         ), row=1, col=1)
 
     now_ms = now_utc.timestamp() * 1000
@@ -1174,7 +1194,7 @@ def page_prediksjon():
         "T = uforstyrret nivå + κ · Vorma-anomali, der κ beregnes fra sist målte "
         f"vannføring (nå {kappa_now:.2f}). "
         "Etter datahorisonten er det ekstrapolering – kun vindenergi-signalet (E) gir "
-        "reell fremoverskuende informasjon (AUC = 0,87 for ΔT < −3 °C)."
+        "reell fremoverskuende informasjon (AUC = 0,77, 95 % KI 0,72–0,88, for ΔT < −3 °C)."
     )
 
     _now_oslo = pd.Timestamp.now(tz='UTC').tz_convert('Europe/Oslo')
@@ -1240,7 +1260,7 @@ def page_prediksjon():
                 help_str   = (
                     "Ekstrapolering: Vorma-anomalien relakserer mot et permanent restnivå "
                     f"({100*RELAX_PERSISTENT:.0f} % av dybden står igjen). Vindrisiko-nivå fra prognosert "
-                    "SE/S-vindenergi (Met.no, AUC = 0,87 for ΔT < −3 °C)."
+                    "SE/S-vindenergi (Met.no, AUC = 0,77 med 95 % KI 0,72–0,88 for ΔT < −3 °C)."
                     + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
                 )
 
@@ -1303,7 +1323,8 @@ def page_prediksjon():
             + (f"; maks i denne prognosen er σ = {_sig_max:.1f} °C. " if _sig_max else ". ")
             + "Vindrisikoen virker **kumulativt**: en vindtopp som har passert fortsetter "
             "å holde båndet åpent nedover, i stedet for å slå av igjen når vinden løyer. "
-            f"Advarsel ved {ENERGY_WARN:.0f} m·h, alarm ved {ENERGY_THRESHOLD:.0f} m·h; "
+            f"Advarsel ved p{ENERGY_PCTL_WARN:.0f} ({ENERGY_WARN:.0f} m·h), alarm ved "
+            f"p{ENERGY_PCTL_ALARM:.0f} ({ENERGY_THRESHOLD:.0f} m·h); "
             f"etter +{WIND_RISK_HORIZON_HOURS} t tones justeringen jevnt ut."
         )
     else:
@@ -1319,7 +1340,8 @@ def page_prediksjon():
             obs_e  = energy_df[~energy_df['is_forecast']]
             fc_e   = energy_df[ energy_df['is_forecast']]
             cur_E  = float(obs_e['E'].iloc[-1]) if not obs_e.empty else 0.0
-            pct    = round(cur_E / ENERGY_THRESHOLD * 100)
+            cur_r  = energy_risk_level(cur_E)
+            cur_p  = cur_r['pctl'] if cur_r['pctl'] is not None else 0.0
             # Vis TOPPEN i varselperioden, ikke siste punkt. Tidligere ble
             # verdien hentet fra fc_e['E'].iloc[-1] - altså helt sist i
             # varselet, ofte etter at vinden hadde løyet - mens advarselen ble
@@ -1336,11 +1358,21 @@ def page_prediksjon():
                 fc_E = fc_Ehi = cur_E
                 fc_lbl, days_to = None, None
 
+            _lvl_txt = {'lav': 'Normalt', 'advarsel': 'Advarsel',
+                        'alarm': 'Alarm'}.get(cur_r['level'], '–')
             c1.metric("Kumulativ E nå",   f"{cur_E:.1f} m·h",
                       help="Rullende 48-timers SE/S-vindenergi (Frost API), 24 t forskjøvet")
-            c2.metric("Andel av terskel", f"{pct} %",
-                      help=f"{ENERGY_THRESHOLD:.0f} m·h = 100 % (AUC = 0.86)")
+            c2.metric("Persentil nå", f"p{cur_p:.0f}",
+                      delta=_lvl_txt,
+                      delta_color="inverse" if cur_r['level'] in ('advarsel', 'alarm') else "off",
+                      help=("Plassering i juli–august-klimatologien for Mjøsa. "
+                            f"p{ENERGY_PCTL_WARN:.0f} gir advarsel, "
+                            f"p{ENERGY_PCTL_ALARM:.0f} gir alarm. Persentil brukes "
+                            "framfor absolutte m·h fordi den er upåvirket av både "
+                            "tidsoppløsning og hvilken vindkilde tallene kommer fra."))
 
+            fc_r = energy_risk_level(fc_E)
+            fc_p = fc_r['pctl'] if fc_r['pctl'] is not None else 0.0
             if fc_lbl:
                 if fc_E >= ENERGY_THRESHOLD:
                     e_delta, e_col = "⚠️ Over alarmterskel", "inverse"
@@ -1351,17 +1383,19 @@ def page_prediksjon():
                 else:
                     e_delta, e_col = f"{fc_lbl}", "off"
                 c3.metric(f"Høyeste prognosert E (+{days_to:.0f} d)",
-                          f"{fc_E:.1f} m·h", delta=e_delta, delta_color=e_col,
+                          f"{fc_E:.1f} m·h  (p{fc_p:.0f})",
+                          delta=e_delta, delta_color=e_col,
                           help=(f"Toppen i varselperioden, ventet {fc_lbl}. "
                                 f"Øvre usikkerhetsgrense {fc_Ehi:.1f} m·h. "
-                                f"Advarsel ved {ENERGY_WARN:.0f}, alarm ved "
-                                f"{ENERGY_THRESHOLD:.0f} m·h."))
+                                f"Advarsel ved p{ENERGY_PCTL_WARN:.0f} "
+                                f"({ENERGY_WARN:.0f} m·h), alarm ved "
+                                f"p{ENERGY_PCTL_ALARM:.0f} ({ENERGY_THRESHOLD:.0f} m·h)."))
             else:
                 c3.metric("Høyeste prognosert E", "N/A",
                           help="Ingen vindprognose tilgjengelig")
         else:
             c1.metric("Kumulativ E nå", "N/A")
-            c2.metric("Andel av terskel", "N/A")
+            c2.metric("Persentil nå", "N/A")
             c3.metric("Høyeste prognosert E", "N/A")
 
         if not weather_mjosa.empty:
@@ -1379,12 +1413,57 @@ def page_prediksjon():
                 if fig_e:
                     st.plotly_chart(fig_e, use_container_width=True, config={"responsive": True})
                 st.caption(
-                    f"E = Σ v_i × Δtᵢ for alle obs der vindretning ∈ 135–225° (SE/S), "
-                    f"48-timers rullende vindu med 24 t lead-tid. "
-                    f"Terskel {ENERGY_THRESHOLD:.0f} m·h og advarsel {ENERGY_WARN:.0f} m·h "
-                    "er empirisk kalibrert mot 3 500+ obs jul–aug 2018–2025 "
-                    "(AUC = 0.86 for ΔT < −3 °C)."
+                    "E = Σ v_i × Δtᵢ for alle obs der vindretning ∈ 135–225° (SE/S), "
+                    "48-timers rullende vindu med 24 t lead-tid, i fysiske m·h. "
+                    f"Advarsel ved p{ENERGY_PCTL_WARN:.0f} ({ENERGY_WARN:.0f} m·h) "
+                    f"og alarm ved p{ENERGY_PCTL_ALARM:.0f} ({ENERGY_THRESHOLD:.0f} m·h) "
+                    "i juli–august-klimatologien for Mjøsa (CERRA 2015–2025, n = 5 456). "
+                    "AUC = 0,77 med 95 % KI 0,72–0,88 for ΔT < −3 °C, blokk-bootstrap "
+                    "på år."
                 )
+
+                with st.expander("Kildeskala – er E på samme skala som kalibreringen?"):
+                    st.markdown(
+                        "Referansefordelingen er hentet fra CERRA-reanalyse, som er "
+                        "sterkt glattet: median vindfart 1,68 m/s og maksimum 7,09 m/s "
+                        "over ti somre. Frost (Kise) og Locationforecast måler og "
+                        "varsler faktiske vindfarter, som ligger høyere. Siden E "
+                        "skalerer lineært med vindfarten, blir persentilene systematisk "
+                        "for høye hvis skalaforskjellen ikke korrigeres.\n\n"
+                        "Testen er enkel: medianen av loggede E-verdier i juli og "
+                        "august skal ligge nær referansemedianen på "
+                        f"{energy_from_percentile(50.0):.0f} m·h."
+                    )
+                    _scale_src = pd.Series(dtype='float64')
+                    if not pred_log.empty and 'wind_E_now' in pred_log.columns:
+                        _sl = pred_log.copy()
+                        if 'logged_at' in _sl.columns:
+                            _lt = pd.to_datetime(_sl['logged_at'], errors='coerce', utc=True)
+                            _sl = _sl[_lt.dt.month.isin([7, 8])]
+                        _scale_src = pd.to_numeric(_sl['wind_E_now'], errors='coerce').dropna()
+                    _est = estimate_energy_scale(_scale_src)
+                    if _est['sufficient']:
+                        st.metric("Målt kildeskala", f"{_est['scale']:.2f}×",
+                                  help=(f"Median i loggen {_est['median_obs']:.1f} m·h mot "
+                                        f"referanse {_est['median_ref']:.1f} m·h "
+                                        f"(n = {_est['n']})."))
+                        if abs(_est['scale'] - ENERGY_SOURCE_SCALE) > 0.25:
+                            st.warning(
+                                f"Loggen tilsier ENERGY_SOURCE_SCALE ≈ "
+                                f"{_est['scale']:.2f}, men kjernen kjører med "
+                                f"{ENERGY_SOURCE_SCALE:.2f}. Sett verdien i "
+                                "glommadyppen_core.py og rull ut på nytt. "
+                                "Skalaen påvirker bare referansen, så loggede "
+                                "E-verdier forblir sammenlignbare bakover.",
+                                icon="📏")
+                        else:
+                            st.success("Skalaen i kjernen stemmer med loggen.", icon="✅")
+                    else:
+                        st.info(
+                            f"For tynt grunnlag ennå: {_est['n']} loggede sommerverdier "
+                            "av 60 nødvendige. Medianen er for ustabil under dette til "
+                            "at et skalatall gjør mer nytte enn skade.",
+                            icon="⏳")
             else:
                 st.warning("Vindenergi-beregning krever Frost API-data.")
 
@@ -1859,14 +1938,14 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
-        st.caption(f"App 1.9.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
+        st.caption(f"App 1.10.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
         - Fetsund (mål): t = 9700 / Q
         - Anomaliform (v1.8)
         - κ = Q_Vorma/(Q_Vorma+Q_Glomma), beregnet
-        - Validert 2018–2025 (AUC = 0,87)
+        - Validert 2018–2025 (AUC = 0,77, KI 0,72–0,88)
         - Ettereffekt: dag 5–12 etter vindepisode
 
         **Glommadyppen – våtdrakt**
