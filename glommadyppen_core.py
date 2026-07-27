@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 # oppstart. Uten sjekken gir en delvis utrulling (ny app + gammel kjerne) bare
 # en sladdet NameError på Streamlit Cloud, som er nesten umulig å feilsøke.
 # Øk versjonen hver gang det legges til navn eller endres funksjonssignaturer.
-CORE_VERSION = "1.9.0"
+CORE_VERSION = "1.10.0"
 
 NVE_BASE_URL    = "https://hydapi.nve.no/api/v1"
 FROST_CLIENT_ID = "582507d2-434f-4578-afbd-919713bb3589"
@@ -230,8 +230,149 @@ WIND_SECTOR_MAX      = 225
 WIND_WINDOW_HOURS    = 48
 WIND_LEAD_HOURS      = 24
 CRITICAL_WIND_SPEED  = 1.9       # m/s
-ENERGY_THRESHOLD     = 70.0      # m·h – alarm
-ENERGY_WARN          = 45.0      # m·h – advarsel
+
+# ── Persentilbaserte terskler (nytt i v1.10) ─────────────────────────────────
+# BAKGRUNN FOR OMLEGGINGEN
+# Fram til v1.9 var tersklene absolutte: 45 m·h (advarsel) og 70 m·h (alarm).
+# Gjennomgang av kalibreringsgrunnlaget avdekket to uavhengige problemer:
+#
+#   1) BLANDEDE ENHETER. Tabell 2 i rapporten (de åtte arrangementene) er
+#      regnet som Σv med dt = 1 per 3-timers CERRA-observasjon over et
+#      7-DØGNS vindu. Tabell 1 (sensitivitet/spesifisitet) er regnet i
+#      fysiske m·h over et 48-TIMERS vindu. De to skalaene skiller ca. 4x og
+#      treffer tilfeldigvis samme tallområde, så feilen er ikke synlig i
+#      tallene alene. Kontroll: rekonstruksjon av Tabell 2 fra rådata gir
+#      68,0 / 5,8 / 55,3 / 33,7 / 97,0 / 35,7 / 30,3 / 20,9 i Σv-enheter mot
+#      rapportens 70,8 / 8,3 / 58,9 / 33,7 / 95,1 / 34,5 / 29,5 / 19,6, og
+#      «Timer»-kolonnen er observasjonstelling, ikke timer. Rekonstruksjon av
+#      Tabell 1 i fysiske m·h gir spesifisitet 0,62 ved 45 og 0,81 ved 70 mot
+#      rapportens 0,63 og 0,81. build_wind_energy_series() regner i fysiske
+#      m·h og er altså riktig - men tallene 45 og 70 stammer fra den andre
+#      tabellen.
+#
+#   2) KILDESKALA. Kalibreringen bygger på CERRA-reanalyse (5,5 km, sterkt
+#      glattet): median vindfart 1,68 m/s og maksimum 7,09 m/s over ti somre.
+#      Frost (Kise SN12680) og Locationforecast leverer faktiske vindfarter
+#      som rutinemessig ligger langt over dette. E skalerer lineært med
+#      vindfarten, så en terskel kalibrert på CERRA ligger for lavt når den
+#      brukes på Frost- og varseldata.
+#
+# Persentiler løser begge. En persentil er invariant både under dt-konvensjon
+# og under lineær kildeskala: ligger E på 92-persentilen, er det like sant om
+# grunnlaget er CERRA eller Kise. Absolutte m·h vises fortsatt i grafene, men
+# selve klassifiseringen skjer i persentilrommet.
+#
+# Referansefordeling: E48 (fysiske m·h, 48 t vindu / 24 t lead) fra CERRA for
+# juli-august 2015-2025, n = 5 456. Første punkt er atomet i null - 10,4 % av
+# tiden er det ingen SE/S-vind i det hele tatt.
+ENERGY_REF_PCTL = [10.4, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65,
+                   70, 75, 80, 85, 90, 92.5, 95, 97.5, 99, 99.5, 100]
+ENERGY_REF_MH   = [0.0, 4.0, 7.4, 10.8, 15.0, 18.8, 23.5, 28.3, 33.0, 38.5,
+                   43.7, 49.8, 55.7, 61.9, 69.2, 81.2, 94.8, 102.7, 111.8,
+                   126.5, 140.9, 153.3, 170.6]
+
+# Lineær skalering av referansefordelingen, for å kompensere for at appens
+# vindkilde ikke har samme fartsfordeling som CERRA. 1.0 = ingen korreksjon.
+# Skalaen virker på REFERANSEN, ikke på E selv, slik at loggede E-verdier
+# forblir sammenlignbare bakover i tid. Sett verdien når forholdstallet er
+# målt - se estimate_energy_scale() og «Kildeskala»-panelet i appen.
+ENERGY_SOURCE_SCALE = 1.0
+
+# Utløsningsfrekvensen er nå et eksplisitt valg, ikke et biprodukt av en
+# absolutt terskel. p85/p95 gir advarsel ca. 15 % og alarm ca. 5 % av juli-
+# august. De gamle absoluttverdiene lå til sammenligning på 39 % og 21 % av
+# tiden - en «alarm» som stod på en femtedel av sommeren.
+ENERGY_PCTL_WARN  = 85.0
+ENERGY_PCTL_ALARM = 95.0
+
+
+def energy_from_percentile(p, scale=None):
+    """Persentil (0-100) → E i fysiske m·h, med kildeskala påført."""
+    s = ENERGY_SOURCE_SCALE if scale is None else float(scale)
+    return float(np.interp(float(p), ENERGY_REF_PCTL, ENERGY_REF_MH)) * s
+
+
+def energy_percentile(e_mh, scale=None):
+    """
+    E i fysiske m·h → persentil i juli-august-klimatologien (0-100).
+
+    Invers av energy_from_percentile(). Returnerer None for manglende eller
+    ikke-numerisk verdi, slik at kallstedene kan skille «ingen data» fra
+    «persentil 0». Verdier over referansemaksimum klippes til 100.
+    """
+    if e_mh is None:
+        return None
+    try:
+        e = float(e_mh)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(e):
+        return None
+    s   = ENERGY_SOURCE_SCALE if scale is None else float(scale)
+    ref = [v * s for v in ENERGY_REF_MH]
+    return float(np.clip(np.interp(e, ref, ENERGY_REF_PCTL), 0.0, 100.0))
+
+
+def energy_risk_level(e_mh, scale=None):
+    """
+    Klassifiserer E i 'lav' / 'advarsel' / 'alarm' etter persentil.
+
+    Returnerer dict med nøklene level, pctl og e_mh. level er None når E
+    mangler, slik at visningslaget kan skrive «N/A» framfor å vise «lav»
+    for data som ikke finnes.
+    """
+    pctl = energy_percentile(e_mh, scale=scale)
+    if pctl is None:
+        return {'level': None, 'pctl': None, 'e_mh': None}
+    if pctl >= ENERGY_PCTL_ALARM:
+        level = 'alarm'
+    elif pctl >= ENERGY_PCTL_WARN:
+        level = 'advarsel'
+    else:
+        level = 'lav'
+    return {'level': level, 'pctl': round(pctl, 1), 'e_mh': float(e_mh)}
+
+
+def estimate_energy_scale(e_values, min_n=60):
+    """
+    Estimerer ENERGY_SOURCE_SCALE fra observerte E-verdier.
+
+    Sammenligner medianen i de observerte verdiene mot medianen i CERRA-
+    referansen (33,0 m·h). Medianen er valgt framfor gjennomsnittet fordi
+    fordelingen er kraftig høyreskjev og har et atom i null.
+
+    e_values bør være E ved observasjonstidspunktet (ikke prognose) fra juli
+    og august - typisk kolonnen wind_E_now i prediksjonsloggen. Utenfor
+    sommersesongen er fordelingen en annen og estimatet blir misvisende.
+
+    Returnerer dict med n, median_obs, median_ref, scale og sufficient.
+    scale er None når grunnlaget er for tynt; med under ~60 verdier er
+    medianen så ustabil at et påført skalatall gjør mer skade enn nytte.
+    """
+    ser = pd.Series(list(e_values), dtype='float64').replace(
+        [np.inf, -np.inf], np.nan).dropna()
+    n          = int(len(ser))
+    median_ref = float(np.interp(50.0, ENERGY_REF_PCTL, ENERGY_REF_MH))
+    if n == 0:
+        return {'n': 0, 'median_obs': None, 'median_ref': median_ref,
+                'scale': None, 'sufficient': False}
+    median_obs = float(ser.median())
+    sufficient = n >= int(min_n) and median_ref > 0 and median_obs > 0
+    return {
+        'n':          n,
+        'median_obs': round(median_obs, 1),
+        'median_ref': round(median_ref, 1),
+        'scale':      round(median_obs / median_ref, 3) if sufficient else None,
+        'sufficient': sufficient,
+    }
+
+
+# Absoluttverdiene beholdes som avledede størrelser. All eksisterende kode som
+# sammenligner mot ENERGY_WARN / ENERGY_THRESHOLD fortsetter å virke, men
+# tallene følger nå persentilvalget og kildeskalaen i stedet for å være
+# frittstående konstanter.
+ENERGY_WARN      = round(energy_from_percentile(ENERGY_PCTL_WARN), 1)
+ENERGY_THRESHOLD = round(energy_from_percentile(ENERGY_PCTL_ALARM), 1)
 
 # ── Vindrisiko-justering av temperaturprognosen ───────────────────────────────
 # Basert på empirisk regresjon: kumulativ vindenergi (E, 48t/24t-lag) mot
@@ -241,10 +382,18 @@ ENERGY_WARN          = 45.0      # m·h – advarsel
 # terskel-klassifikatoren over til det formålet) - men den brukes her til å
 # SKJEVE usikkerhetsbåndet nedover og utvide det når værvarselet tilsier økt
 # oppvellingsrisiko innenfor den horisonten Met.no-vindvarselet faktisk er
-# pålitelig (jf. AUC=0.87 ved 1-3 døgn vs. 0.57 ved 7 døgn).
+# pålitelig. Blokk-bootstrap på år (8 somre, 8 uavhengige kalde episoder)
+# gir AUC = 0.77 med 95 % KI 0.72-0.88 - rapportens 0.87 ligger i toppen
+# av intervallet. Youden-optimal terskel er 66 m·h med 95 % KI 44-76 m·h,
+# altså bestemt til om lag ±25 m·h. Det er nettopp denne bredden som gjør
+# persentilvalget mer forsvarlig enn en absoluttverdi med to siffer.
 WIND_RISK_HORIZON_HOURS = 96      # t – utover dette anses vindvarselet for upålitelig
 WIND_ANOMALY_SLOPE      = -0.015  # °C per m·h (svak, empirisk - se analysenotat)
-WIND_ANOMALY_E_TYPISK   = 32.0    # m·h – median E i datasettet, brukt som nullpunkt
+WIND_ANOMALY_E_TYPISK   = round(energy_from_percentile(50.0), 1)
+                                  # m·h – median E i referansen (33.0 ved skala 1.0)
+# Stigningstallet er tilpasset på CERRA-skala. Skaleres referansen opp,
+# må °C per m·h ned tilsvarende, ellers dobbeltteller korreksjonen.
+WIND_ANOMALY_SLOPE_EFF  = WIND_ANOMALY_SLOPE / max(ENERGY_SOURCE_SCALE, 1e-6)
 # Vindrisikoen skal virke KUMULATIVT og VEDVARENDE, ikke som et øyeblikksbilde.
 # Fram til v1.8 ble E slått opp punktvis på hvert prognosetidspunkt, med tre
 # følger som alle ga urealistiske hakk i båndet:
@@ -1521,7 +1670,7 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             sigma_mult = 1.0 + (mult - 1.0) * horizon_w
             # Kun nedsiderisiko - vind gir aldri grunnlag for å anta varmere.
             risk_shift = horizon_w * min(
-                0.0, WIND_ANOMALY_SLOPE * (e_fc - WIND_ANOMALY_E_TYPISK))
+                0.0, WIND_ANOMALY_SLOPE_EFF * (e_fc - WIND_ANOMALY_E_TYPISK))
             e_fc = round(e_fc, 1)
 
         # Vindrisiko utvider kun kaldsiden - vind gir aldri grunnlag for å anta
@@ -1574,4 +1723,4 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
     return out
 
 
-__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
+__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'ENERGY_REF_PCTL', 'ENERGY_REF_MH', 'ENERGY_SOURCE_SCALE', 'ENERGY_PCTL_WARN', 'ENERGY_PCTL_ALARM', 'energy_from_percentile', 'energy_percentile', 'energy_risk_level', 'estimate_energy_scale', 'WIND_ANOMALY_SLOPE_EFF', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
