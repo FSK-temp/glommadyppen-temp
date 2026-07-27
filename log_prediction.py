@@ -32,7 +32,7 @@ import glommadyppen_core as core
 # Ark-ID og fanenavn er definert ETT sted (glommadyppen_core.py) slik at
 # skriving (her) og lesing (appen, via core.read_prediction_log) aldri kan
 # komme ut av synk.
-REQUIRED_CORE_VERSION = "1.9.0"
+REQUIRED_CORE_VERSION = "1.10.0"
 if getattr(core, "CORE_VERSION", None) != REQUIRED_CORE_VERSION:
     # Feil hardt og tidlig. Skriver vi til arket med en gammel kjerne, blir
     # loggen stille inkonsistent - noen rader med dynamisk κ, andre uten - og
@@ -64,6 +64,13 @@ HEADER = (
        "kappa_source", "forecast_mode", "seiche_rejected_reason"]
     + [f"sigma_h{h}" for h in LOG_HORIZONS_H]
     + [f"delta_vorma_h{h}" for h in LOG_HORIZONS_H]
+    # ── Nytt fra v1.10 ───────────────────────────────────────────────────────
+    # Persentilen logges ved siden av m·h, ikke i stedet for. Absoluttverdien
+    # er rådata og må stå urørt; persentilen avhenger av referansefordelingen
+    # og ENERGY_SOURCE_SCALE, som kan bli justert senere. Logges begge, kan en
+    # framtidig rekalibrering regnes om bakover uten å hente vinddata på nytt.
+    + ["wind_E_pctl", "wind_risk_level", "energy_source_scale"]
+    + [f"windE_pctl_h{h}" for h in LOG_HORIZONS_H]
 )
 
 
@@ -150,6 +157,8 @@ def build_snapshot():
         if not obs_e.empty:
             wind_e_now = float(obs_e['E'].iloc[-1])
 
+    wind_e_risk = core.energy_risk_level(wind_e_now)
+
     forecast_df = core.build_fetsund_forecast(
         primary_df, fetsund_temp, ertesekken_q,
         glomma_q_df=funnefoss_q, energy_df=energy_df,
@@ -172,6 +181,9 @@ def build_snapshot():
         "discharge_q":          round(float(q_used), 1),
         "travel_hours":         travel_hours,
         "wind_E_now":           round(wind_e_now, 1) if wind_e_now is not None else None,
+        "wind_E_pctl":          wind_e_risk['pctl'],
+        "wind_risk_level":      wind_e_risk['level'],
+        "energy_source_scale":  core.ENERGY_SOURCE_SCALE,
         "seiche_active":        bool(seiche['active']),
         "seiche_days_remaining": seiche['days_remaining'],
         # ── Nytt fra v1.7 ────────────────────────────────────────────────────
@@ -190,7 +202,7 @@ def build_snapshot():
             row.update({f"predicted_h{h}": None, f"lower68_h{h}": None,
                         f"upper68_h{h}": None, f"windE_fc_h{h}": None,
                         f"windrisk_h{h}": None, f"sigma_h{h}": None,
-                        f"delta_vorma_h{h}": None})
+                        f"delta_vorma_h{h}": None, f"windE_pctl_h{h}": None})
         else:
             row.update({
                 f"predicted_h{h}": r['predicted'],
@@ -200,6 +212,7 @@ def build_snapshot():
                 f"windrisk_h{h}":  r.get('wind_risk_level'),
                 f"sigma_h{h}":       r.get('sigma'),
                 f"delta_vorma_h{h}": r.get('delta_vorma'),
+                f"windE_pctl_h{h}":  core.energy_percentile(r.get('wind_E_forecast')),
             })
 
     event_pred = core.predict_fetsund_temperature(
@@ -300,7 +313,9 @@ def main():
         sys.exit(0)  # ikke en feil - bare ingen data tilgjengelig akkurat nå
 
     print(f"Logger snapshot for {snapshot['logged_at']} "
-          f"(predicted_event={snapshot['predicted_event']})")
+          f"(predicted_event={snapshot['predicted_event']}, "
+          f"E={snapshot['wind_E_now']} m·h / p{snapshot['wind_E_pctl']}, "
+          f"nivå={snapshot['wind_risk_level']})")
 
     ws = get_worksheet()
     append_row(ws, snapshot)
