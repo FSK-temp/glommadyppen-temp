@@ -1568,7 +1568,7 @@ def page_data_varsel():
             "median (Q_Ertesekken + Q_Funnefoss) / Q_Blaker = 1,03 over 2015–2025."
         )
 
-        st.subheader("Transporttid-kalkulator")
+        st.subheader("Transporttid fra Svanefoss/Ertesekken")
         q_now, _ = safe_discharge(er_q, FALLBACK_DISCHARGE)
         q_now = min(max(q_now, 100), 1200)
         q_val = st.slider("Vannføring ved Ertesekken (m³/s)",
@@ -1577,7 +1577,7 @@ def page_data_varsel():
         tf_calc = round(TRANSPORT_COEFF_FLOTERN / q_val, 1)
         t_calc  = round(TRANSPORT_COEFF / q_val, 1)
         st.info(
-            f"**Fløter'n: t = 7670 / {q_val} = {tf_calc} timer** (35,5 km)  \n"
+            f"**Start Fløter'n: t = 7670 / {q_val} = {tf_calc} timer** (35,5 km)  \n"
             f"**Fetsund:  t = 9700 / {q_val} = {t_calc} timer** (45,0 km)  \n"
             f"*Fløter'n: {t_calc - tf_calc:.1f} timer tidligere enn Fetsund*"
         )
