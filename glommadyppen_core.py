@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 # oppstart. Uten sjekken gir en delvis utrulling (ny app + gammel kjerne) bare
 # en sladdet NameError på Streamlit Cloud, som er nesten umulig å feilsøke.
 # Øk versjonen hver gang det legges til navn eller endres funksjonssignaturer.
-CORE_VERSION = "1.10.0"
+CORE_VERSION = "1.11.3"
 
 NVE_BASE_URL    = "https://hydapi.nve.no/api/v1"
 FROST_CLIENT_ID = "582507d2-434f-4578-afbd-919713bb3589"
@@ -46,8 +46,32 @@ FROST_STATION_KISE = "SN12680"
 
 # ── Met.no koordinater ───────────────────────────────────────────────────────
 MJOSA_LAT,       MJOSA_LON       = 60.78,   10.72
+# BINGSFOSSEN_* er ikke i bruk noe sted i appen eller loggeren, og koordinatet
+# ser feil ut: Bingsfossen ligger ved Sørumsand, ikke ved Årnes. Navnet
+# beholdes for bakoverkompatibilitet, men skal ikke brukes til nye
+# varselpunkter. Bruk FLOTERN_START_* under for startområdet.
 BINGSFOSSEN_LAT, BINGSFOSSEN_LON = 60.2172, 11.5528
-FETSUND_LAT,     FETSUND_LON     = 59.9297, 11.5833
+
+# ── Fløter'n: navnet på selve svømmeturen, ikke et sted ──────────────────────
+# Fløter'n er betegnelsen på den 11 km lange turen fra startpunktet under til
+# Fetsund lenser. «Fløter'n» i variabelnavn og transportkoeffisienter betyr
+# derfor STARTPUNKTET for turen - ikke kafeen med samme navn ved lenserne.
+#
+# Startpunktet ligger litt sørvest for Bingsfossen, ca. 2,7 km i luftlinje
+# nedstrøms Blaker-stasjonen (2.17.0). Det stemmer med at modellen plasserer
+# Blaker på 31,8 km og starten på 35,5 km fra Svanefoss: 3,7 km langs elva mot
+# 2,7 km i luftlinje gir sinuositet 1,39, samme forhold som resten av strekket.
+FLOTERN_START_LAT, FLOTERN_START_LON = 59.9903, 11.2607
+
+# Arrangementspunkt for Locationforecast (Fetsund lenser, målområdet).
+# RETTET i v1.11.2: sto tidligere 59.9297, 11.5833. Breddegraden var omtrent
+# riktig, men lengdegraden lå 0,43° for langt øst - ca. 24 km inn i skogen mot
+# Rømskog, altså et helt annet sted enn arrangementet. Værvarselet for
+# målområdet gjaldt dermed feil lokasjon.
+# Fetsund lenser: 59,9214°N, 11,1527°E. NVE-stasjonen Fetsund bru (2.587.0)
+# oppgis til 59,921 / 11,153 i prosjektets stasjonsfil, altså samme punkt.
+# Locationforecast har ca. 1 km rutenett, så flere desimaler er meningsløst.
+FETSUND_LAT,     FETSUND_LON     = 59.9214, 11.1527
 
 # ── Modellparametere ─────────────────────────────────────────────────────────
 # Transportkoeffisienter t = k / Q (timer), der Q = vannføring Ertesekken (m³/s)
@@ -55,6 +79,32 @@ TRANSPORT_COEFF         = 9700   # Svanefoss → Fetsund   (45,0 km) – empiris
 TRANSPORT_COEFF_BLA     = 6871   # Svanefoss → Blaker    (31,8 km) – empirisk kalibrert (R²=0,73, n=19)
 TRANSPORT_COEFF_FLOTERN = 7670   # Svanefoss → Fløter'n  (35,5 km) – avledet: 6871 × 35.5/31.8
 FALLBACK_DISCHARGE      = 437.0  # August-median Ertesekken (m³/s)
+
+# ── Løpsstrekket: start → Fetsund lenser ─────────────────────────────────────
+# Glommadyppen svømmes MED strømmen fra startpunktet (FLOTERN_START_*) ned til
+# Fetsund lenser (FETSUND_*).
+#
+# 11,0 km er OPPMÅLT langs midtstrømmen (Fet Svømmeklubb). Luftlinjen mellom de
+# to verifiserte koordinatene er 9,74 km, så oppmålingen svarer til sinuositet
+# 1,13 - lavt, men troverdig for det rette strekket ned mot Øyeren-deltaet.
+#
+# Lengden er bevisst IKKE satt til differansen mellom transportavstandene
+# (45,0 − 35,5 = 9,5 km). Det tallet er praktisk talt identisk med luftlinjen
+# 9,74 km, altså sinuositet ≈ 0,98 - fysisk umulig for en elv. Til
+# sammenligning har de øvrige avstandene i modellen sinuositet 1,3-1,4 målt mot
+# luftlinje (Svanefoss → start: 35,5 mot 25,3 km; Blaker → start: 3,7 mot
+# 2,7 km). Det er altså de 45,0 km som er tallet som ikke stemmer: 35,5 + 11,0
+# gir 46,5 km langs elva.
+#
+# TRANSPORT COEFFISIENTENE SKAL LIKEVEL IKKE RØRES, og det er verdt å se hvorfor
+# avstandsfeilen ikke smitter over:
+#   · TRANSPORT_COEFF = 9700 er kalibrert mot observerte ANKOMSTTIDER ved
+#     Fetsund, ikke mot avstand. En feil i «45,0 km» er ren merkelapp.
+#   · TRANSPORT_COEFF_FLOTERN = 6871 × 35,5/31,8 bruker bare 35,5 og 31,8, som
+#     begge har konsistent sinuositet. Forholdet er upåvirket av 45,0.
+# Δk = 9700 − 7670 = 2030 er dermed intakt, og avstanden inngår kun der den
+# står eksplisitt: i hastighetsregnestykket i reach_current_speed().
+REACH_FLOTERN_FETSUND_KM = 11.0   # oppmålt langs midtstrømmen
 
 # ── Uttynning ved samløpet Vorma × Glomma ────────────────────────────────────
 # κ er IKKE en fri modellkonstant - den ER Vormas blandingsandel i samløpet:
@@ -748,6 +798,100 @@ def calculate_travel_time(discharge_df):
             round(TRANSPORT_COEFF / q, 1),
             round(q, 0),
             label)
+
+
+def reach_current_speed(q_m3s, k_from=None, k_to=None, length_km=None):
+    """
+    Middelhastighet i strømmen på en strekning: oppmålt lengde delt på
+    transporttiden fra de samme koeffisientene prediksjonsmodellen bruker.
+
+        Δt = (k_to − k_from) / Q          [timer]
+        v  = length / Δt
+           = Q · length_m / ((k_to − k_from) · 3600)          [m/s]
+
+    Standard er løpsstrekket Fløter'n → Fetsund (11,0 km oppmålt langs
+    midtstrømmen, Δk = 9700 − 7670 = 2030), som gir
+
+        v ≈ Q / 664   m/s      →   Q = 437 m³/s  ⇒  0,66 m/s
+
+    ── Hvorfor 11 km og ikke 9,5 ────────────────────────────────────────────
+    Differansen mellom kartavstandene (45,0 − 35,5) ville gitt 9,5 km og
+    v ≈ Q / 769. Den oppmålte lengden er å foretrekke: 9,5 km er praktisk talt
+    luftlinjen mellom start og mål (9,74 km), altså sinuositet ≈ 0,98, som er
+    fysisk umulig for en elv. Se kommentaren ved REACH_FLOTERN_FETSUND_KM -
+    feilen ligger i «45,0 km», og koeffisientene er upåvirket fordi de er
+    kalibrert på ankomsttider.
+
+    ── Hva tallet IKKE er ───────────────────────────────────────────────────
+    Dette er en strekningsmiddelverdi for vannmassen som helhet - det er
+    kaldpulsens framdrift som er kalibrert, ikke overflatehastigheten. En
+    svømmer i overflaten midt i hovedstrømmen ligger typisk 10-25 % over
+    dette, mens hastigheten faller i de brede, stilleflytende partiene mot
+    Nordre Øyeren. Bruk tallet som et anslag for strekket som helhet, ikke som
+    en lovnad om drahjelp på et gitt punkt i elva.
+
+    Returnerer 0.0 hvis vannføringen mangler eller er ugyldig.
+    """
+    k_from = TRANSPORT_COEFF_FLOTERN if k_from is None else float(k_from)
+    k_to   = TRANSPORT_COEFF         if k_to   is None else float(k_to)
+    length_km = (REACH_FLOTERN_FETSUND_KM if length_km is None
+                 else float(length_km))
+
+    if q_m3s is None or not np.isfinite(q_m3s) or q_m3s <= 0:
+        return 0.0
+    dk = k_to - k_from
+    if dk <= 0 or length_km <= 0:
+        return 0.0
+    return float(q_m3s) * (length_km * 1000.0) / (dk * 3600.0)
+
+
+def swim_assist(q_m3s, pace_s_per_100m, k_from=None, k_to=None, length_km=None):
+    """
+    Hva strømmen er verdt for en svømmer på løpsstrekket.
+
+    Hastighetene legges rett sammen (v_total = v_svøm + v_strøm). Det er riktig
+    for en svømmer som følger strømmen nedover: vannet er referansesystemet, og
+    egenfarten er per definisjon fart RELATIVT til vannet.
+
+    pace_s_per_100m : egenfart i stillestående vann, sekunder per 100 m.
+
+    Returnerer dict med:
+        v_current   strømhastighet                       (m/s)
+        v_swim      egenfart                             (m/s)
+        v_total     samlet framdrift over bunnen          (m/s)
+        t_still     tid uten strøm                        (sekunder)
+        t_current   tid med strøm                         (sekunder)
+        gain        spart tid                             (sekunder)
+        gain_pct    spart tid                             (%)
+        drift_s     tid for å drive hele strekket uten å svømme (sekunder)
+        length_km   strekningslengde brukt i regnestykket
+    Returnerer None hvis vannføring eller fart er ugyldig.
+    """
+    length_km = (REACH_FLOTERN_FETSUND_KM if length_km is None
+                 else float(length_km))
+    if (pace_s_per_100m is None or not np.isfinite(pace_s_per_100m)
+            or pace_s_per_100m <= 0):
+        return None
+
+    v_cur  = reach_current_speed(q_m3s, k_from, k_to, length_km)
+    v_swim = 100.0 / float(pace_s_per_100m)
+    dist_m = length_km * 1000.0
+
+    t_still   = dist_m / v_swim
+    t_current = dist_m / (v_swim + v_cur)
+    gain      = t_still - t_current
+
+    return {
+        'v_current': v_cur,
+        'v_swim':    v_swim,
+        'v_total':   v_swim + v_cur,
+        't_still':   t_still,
+        't_current': t_current,
+        'gain':      gain,
+        'gain_pct':  100.0 * gain / t_still if t_still > 0 else float('nan'),
+        'drift_s':   dist_m / v_cur if v_cur > 0 else float('nan'),
+        'length_km': length_km,
+    }
 
 
 def _hourly_series(df, value_col='value'):
@@ -1723,4 +1867,4 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
     return out
 
 
-__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'ENERGY_REF_PCTL', 'ENERGY_REF_MH', 'ENERGY_SOURCE_SCALE', 'ENERGY_PCTL_WARN', 'ENERGY_PCTL_ALARM', 'energy_from_percentile', 'energy_percentile', 'energy_risk_level', 'estimate_energy_scale', 'WIND_ANOMALY_SLOPE_EFF', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
+__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FLOTERN_START_LAT', 'FLOTERN_START_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'REACH_FLOTERN_FETSUND_KM', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'ENERGY_REF_PCTL', 'ENERGY_REF_MH', 'ENERGY_SOURCE_SCALE', 'ENERGY_PCTL_WARN', 'ENERGY_PCTL_ALARM', 'energy_from_percentile', 'energy_percentile', 'energy_risk_level', 'estimate_energy_scale', 'WIND_ANOMALY_SLOPE_EFF', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'reach_current_speed', 'swim_assist', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
