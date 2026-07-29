@@ -78,7 +78,7 @@ st.set_page_config(
 # melding om nøyaktig hva som er ute av synk.
 # ============================================================================
 
-REQUIRED_CORE_VERSION = "1.10.0"
+REQUIRED_CORE_VERSION = "1.11.3"
 
 _REQUIRED_CORE_ATTRS = [
     # v1.7 - dynamisk uttynning og robusthet
@@ -93,6 +93,9 @@ _REQUIRED_CORE_ATTRS = [
     "ENERGY_REF_PCTL", "ENERGY_REF_MH", "energy_percentile",
     "energy_from_percentile", "energy_risk_level", "estimate_energy_scale",
     "WIND_ANOMALY_SLOPE_EFF",
+    # v1.11 - strømhastighet og drahjelp på løpsstrekket
+    "REACH_FLOTERN_FETSUND_KM", "reach_current_speed", "swim_assist",
+    "FLOTERN_START_LAT", "FLOTERN_START_LON",
 ]
 
 
@@ -163,7 +166,7 @@ def _check_core_version():
             language=None)
     st.markdown(
         "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
-        "`CORE_VERSION = \"1.10.0\"` på linje 30 og er cirka 1 450 linjer lang. "
+        "`CORE_VERSION = \"1.11.3\"` på linje 30 og er cirka 1 550 linjer lang. "
         "Ligger det flere kopier i repoet, er det stien over som gjelder."
     )
 
@@ -1008,7 +1011,8 @@ def page_prediksjon():
     st.markdown(
         "Predikert vanntemperatur langs den lengste svømmestrekningen i Glommadyppen basert på observasjoner i Mjøsa, "
         "Vorma og Glomma. Primært prediksjonspunkt er startpunktet til **Fløter'n** (Glommadyppen), "
-        "35,5 km fra Svanefoss. Fetsund bru 10,5 km lengre nedstrøms Glomma er sekundært "
+        "35,5 km fra Svanefoss. «Fløter'n» er navnet på selve 11 km-turen, ikke et sted. "
+        "Fetsund lenser/bru 11 km lengre nedstrøms Glomma er sekundært "
         "målepunkt. Det kalde vannet ankommer startpunktet til Fløter'n **4–5 timer tidligere** enn ved sluttpunktet"
         "ved typisk augustvannføring."
     )
@@ -1200,11 +1204,19 @@ def page_prediksjon():
     _now_oslo = pd.Timestamp.now(tz='UTC').tz_convert('Europe/Oslo')
 
     def _dato_label(h):
+        """Dato OG klokkeslett prediksjonen gjelder for (norsk tid).
+
+        Uten klokkeslettet var kolonnene tvetydige: «+48 t» er ikke et døgn,
+        det er ett punkt 48 timer fram – som havner på samme klokkeslett som
+        nå, ikke på løpstidspunktet."""
         target = _now_oslo + pd.Timedelta(hours=h)
-        return target.strftime('%a %d.%m')
+        return target.strftime('%a %d.%m kl. %H:%M')
+
+    _horizon_end = _now_oslo + pd.Timedelta(hours=travel_h_now)
 
     HORIZONS = [
-        (f"Nå–+{travel_h_now:.0f} t\n(databasert)", travel_h_now),
+        (f"Nå–{_horizon_end.strftime('%a %H:%M')} (+{travel_h_now:.0f} t)\n(databasert)",
+         travel_h_now),
         (_dato_label(48), 48),
         (_dato_label(72), 72),
         (_dato_label(96), 96),
@@ -1229,6 +1241,15 @@ def page_prediksjon():
             idx = (fc_t - target_t).abs().idxmin()
             row = forecast_df.loc[idx]
 
+            # Modellen er punktvis i 3-timers steg, så raden som velges kan
+            # ligge inntil 1,5 t fra det nominelle tidspunktet. Vi merker
+            # kolonnen med tidspunktet raden FAKTISK gjelder for – ellers
+            # lover etiketten en presisjon prognosen ikke har.
+            _row_t = pd.Timestamp(fc_t.loc[idx]).tz_convert('Europe/Oslo')
+            _valid_txt = _row_t.strftime('%a %d.%m kl. %H:%M')
+            if h > travel_h_now:
+                label = _valid_txt
+
             pred     = row['predicted']
             lo68     = row['lower_68']
             hi68     = row['upper_68']
@@ -1245,6 +1266,7 @@ def page_prediksjon():
                 _sig = row.get('sigma')
                 _dv  = row.get('delta_vorma')
                 help_str   = (
+                    f"Verdien gjelder {_valid_txt} (norsk tid). "
                     "Basert på observert vann i Vorma (anomaliform)."
                     + (f" Vorma-anomali under transport = {_dv:+.1f} °C." if pd.notna(_dv) else "")
                     + (f" σ = {_sig:.2f} °C." if pd.notna(_sig) else "")
@@ -1258,6 +1280,7 @@ def page_prediksjon():
                               if risk in ("advarsel", "alarm") else "off")
                 _sig = row.get('sigma')
                 help_str   = (
+                    f"Verdien gjelder {_valid_txt} (norsk tid). "
                     "Ekstrapolering: Vorma-anomalien relakserer mot et permanent restnivå "
                     f"({100*RELAX_PERSISTENT:.0f} % av dybden står igjen). Vindrisiko-nivå fra prognosert "
                     "SE/S-vindenergi (Met.no, AUC = 0,77 med 95 % KI 0,72–0,88 for ΔT < −3 °C)."
@@ -1270,6 +1293,16 @@ def page_prediksjon():
                 delta_color=delta_col,
                 help=help_str,
             )
+        st.caption(
+            "**Klokkeslettene er norsk tid (Europe/Oslo), og hver kolonne er ett "
+            "tidspunkt – ikke et døgnmiddel.** Fordi horisontene måles i timer fra "
+            f"nå ({_now_oslo.strftime('%H:%M')}), lander de på omtrent samme "
+            "klokkeslett hver dag; modellen regnes i 3-timers steg, så kolonnen "
+            "viser steget nærmest tidspunktet i etiketten.  \n"
+            "For løpet er dette lite kritisk: døgnvariasjonen ved Fetsund i "
+            "løpsvinduet 10–13 er bare −0,14 til −0,02 °C, så en prediksjon som "
+            "gjelder et annet klokkeslett er i praksis gyldig også for starten."
+        )
     else:
         st.warning("Ikke nok data for dagsprognose.")
 
@@ -1501,6 +1534,7 @@ def page_data_varsel():
         fn_q       = fetch_nve_data(STATION_FUNNEFOSS_Q,    1001, hours_back=168)
         frost_vind = fetch_frost_wind(hours_back=168)
         fc_mjosa   = fetch_weather_forecast(MJOSA_LAT,   MJOSA_LON)
+        fc_start   = fetch_weather_forecast(FLOTERN_START_LAT, FLOTERN_START_LON)
         fc_fetsund = fetch_weather_forecast(FETSUND_LAT, FETSUND_LON)
 
     # ── TAB 1: Vanntemperatur ─────────────────────────────────────────────────
@@ -1528,7 +1562,7 @@ def page_data_varsel():
         Svanefoss (2.52.0) i Vorma ca. 22 km fra Mjøsa (referansepunkt) ·
         Funnefoss (2.410.0) i Glomma ca. 5 km ovenfor samløp ·
         Blaker (2.17.0) i Glomma 31,8 km fra Svanefoss ·
-        **Fløter'n** (start Glommadyppen) 35,5 km fra Svanefoss – ingen NVE-stasjon ·
+        **Startpunktet** for Fløter'n (Glommadyppen) 35,5 km fra Svanefoss – ingen NVE-stasjon ·
         Fetsund (2.587.0) målpunkt Glommadyppen, 45 km fra Svanefoss.
         """)
 
@@ -1582,6 +1616,81 @@ def page_data_varsel():
             f"*Fløter'n: {t_calc - tf_calc:.1f} timer tidligere enn Fetsund*"
         )
 
+        # ── Drahjelp for svømmeren på løpsstrekket ───────────────────────────
+        # Oppmålt løypelengde (11,0 km langs midtstrømmen) delt på differansen i
+        # transporttid gir strømhastigheten på løpsstrekket.
+        st.subheader("Drahjelp for svømmeren – Fløter'n → Fetsund")
+
+        v_cur     = reach_current_speed(q_val)
+        drift_h   = (TRANSPORT_COEFF - TRANSPORT_COEFF_FLOTERN) / q_val
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric(
+            "Strømhastighet", f"{v_cur:.2f} m/s",
+            help=(f"v = Q · 11 000 m / (Δk · 3600 s) der Δk = 9700 − 7670 = "
+                  f"2030, altså v ≈ Q / 664. Løypelengden er oppmålt langs "
+                  f"midtstrømmen. Differansen mellom kartavstandene 45,0 − 35,5 "
+                  f"km ville gitt 9,5 km og {q_val / 769.3:.2f} m/s, men 9,5 km "
+                  f"er praktisk talt luftlinjen mellom start og mål (9,74 km) – "
+                  f"altså ingen sinuositet, som er umulig for en elv."),
+        )
+        s2.metric("Samme fart", f"{v_cur * 3.6:.2f} km/t")
+        s3.metric(
+            f"Ren drift {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
+            help="Tiden strekket tar uten å svømme i det hele tatt – "
+                 "identisk med differansen i transporttid over.",
+        )
+
+        def _hms(sec):
+            sec = int(round(sec))
+            return f"{sec // 3600}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
+        _PACES = [(80, "1:20"), (100, "1:40"), (120, "2:00"),
+                  (150, "2:30"), (180, "3:00")]
+        _rows = []
+        for _p_s, _p_lbl in _PACES:
+            a = swim_assist(q_val, _p_s)
+            if a is None:
+                continue
+            _rows.append({
+                "Egenfart (min/100 m)":  _p_lbl,
+                "Egenfart (m/s)":        f"{a['v_swim']:.2f}",
+                "Med strøm (m/s)":       f"{a['v_total']:.2f}",
+                "Tid uten strøm":        _hms(a['t_still']),
+                "Tid med strøm":         _hms(a['t_current']),
+                "Spart":                 f"{_hms(a['gain'])}  ({a['gain_pct']:.0f} %)",
+            })
+        if _rows:
+            st.dataframe(pd.DataFrame(_rows), hide_index=True,
+                         use_container_width=True)
+
+        st.caption(
+            f"**Slik leses tallet:** ved Q = {q_val} m³/s får svømmeren "
+            f"**{v_cur:.2f} m/s** i drahjelp over løpsstrekket – strømmen gjør "
+            "en jevn del av jobben uansett hvor fort du selv svømmer, og betyr "
+            "relativt sett mest for de bakerste i feltet.  \n"
+            f"**Løypelengde:** 11,0 km oppmålt langs midtstrømmen, fra "
+            f"startpunktet ({FLOTERN_START_LAT:.4f}°N, {FLOTERN_START_LON:.4f}°E, "
+            "litt sørvest for Bingsfossen) til Fetsund lenser. Den faktiske "
+            "distansen varierer med hvilken linje man svømmer; holder man seg "
+            "utenfor hovedstrømmen blir strekket kortere, men drahjelpen "
+            "tilsvarende svakere.  \n"
+            "**Forbehold:** hastigheten er en *strekningsmiddelverdi* for "
+            "vannmassen, avledet av transportkoeffisientene som er kalibrert på "
+            "kaldpulsens framdrift – ikke på overflatestrømmen. Midt i "
+            "hovedstrømmen ligger overflaten typisk 10–25 % høyere, mens farten "
+            "faller i de brede, stilleflytende partiene mot Nordre Øyeren. Bruk "
+            "tallet som et anslag for strekket som helhet, ikke som en lovnad om "
+            "drahjelp på et gitt punkt.  \n"
+            "**Konsistens:** luftlinjen mellom de to koordinatene er 9,74 km, "
+            "så 11,0 km svarer til sinuositet 1,13. De 9,5 km som "
+            "kartavstandene 45,0 − 35,5 gir, ville betydd sinuositet 0,98 – "
+            "altså er det «45,0 km» som er for lite; 35,5 + 11,0 gir 46,5 km "
+            "langs elva. Transporttidene berøres ikke: 9700 er kalibrert mot "
+            "observerte ankomsttider, og 7670 = 6871 × 35,5/31,8 bruker ikke "
+            "45,0 i det hele tatt."
+        )
+
     # ── TAB 3: Vind ved Mjøsa ─────────────────────────────────────────────────
     with tabs[2]:
         st.subheader("Vindmålinger – Kise, søndre Mjøsa (siste 7 dager)")
@@ -1624,11 +1733,11 @@ def page_data_varsel():
             "Timesoppløsning de første 3 dagene, deretter 6-timers intervaller."
         )
 
-        col_mjosa, col_fetsund = st.columns(2)
+        col_mjosa, col_start, col_fetsund = st.columns(3)
 
         with col_mjosa:
             st.markdown("### 📍 Søndre Mjøsa / Kise")
-            st.caption("60.78°N, 10.72°E – referansepunkt for oppvellingsanalyse")
+            st.caption(f"{MJOSA_LAT:.2f}°N, {MJOSA_LON:.2f}°E – referansepunkt for oppvellingsanalyse")
             if fc_mjosa.empty:
                 st.warning("Varsel ikke tilgjengelig")
             else:
@@ -1640,9 +1749,23 @@ def page_data_varsel():
                 if chart:
                     st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
 
+        with col_start:
+            st.markdown("### 🏊 Startpunkt (Fløter'n)")
+            st.caption(f"{FLOTERN_START_LAT:.4f}°N, {FLOTERN_START_LON:.4f}°E "
+                       "– litt sørvest for Bingsfossen")
+            if fc_start.empty:
+                st.warning("Varsel ikke tilgjengelig")
+            else:
+                tbl = _daily_forecast_table_fetsund(fc_start)
+                if tbl is not None:
+                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                chart = _weather_fetsund_chart(fc_start, "Værvarsler – startpunktet")
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True, config={"responsive": True})
+
         with col_fetsund:
             st.markdown("### 🏁 Fetsund lenser (mål)")
-            st.caption("59.93°N, 11.58°E – arrangementspunkt")
+            st.caption(f"{FETSUND_LAT:.4f}°N, {FETSUND_LON:.4f}°E – arrangementspunkt")
             if fc_fetsund.empty:
                 st.warning("Varsel ikke tilgjengelig")
             else:
@@ -1938,7 +2061,7 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
-        st.caption(f"App 1.10.0 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
+        st.caption(f"App 1.11.3 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
