@@ -1633,7 +1633,7 @@ def page_data_varsel():
         )
         s2.metric("Strømhastighet, km/t", f"{v_cur * 3.6:.2f} km/t")
         s3.metric(
-            f"Ren drift {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
+            f"Max tid Fløter'n {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
             help="Tiden strekket tar uten å svømme i det hele tatt – "
                  "identisk med differansen i transporttid over.",
         )
