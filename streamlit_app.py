@@ -1626,15 +1626,12 @@ def page_data_varsel():
 
         s1, s2, s3 = st.columns(3)
         s1.metric(
-            "Strømhastighet", f"{v_cur:.2f} m/s",
+            "Strømhastighet, m/s", f"{v_cur:.2f} m/s",
             help=(f"v = Q · 11 000 m / (Δk · 3600 s) der Δk = 9700 − 7670 = "
                   f"2030, altså v ≈ Q / 664. Løypelengden er oppmålt langs "
-                  f"midtstrømmen. Differansen mellom kartavstandene 45,0 − 35,5 "
-                  f"km ville gitt 9,5 km og {q_val / 769.3:.2f} m/s, men 9,5 km "
-                  f"er praktisk talt luftlinjen mellom start og mål (9,74 km) – "
-                  f"altså ingen sinuositet, som er umulig for en elv."),
+                  f"midtstrømmen."),
         )
-        s2.metric("Samme fart", f"{v_cur * 3.6:.2f} km/t")
+        s2.metric("Strømhastighet, km/t", f"{v_cur * 3.6:.2f} km/t")
         s3.metric(
             f"Ren drift {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
             help="Tiden strekket tar uten å svømme i det hele tatt – "
@@ -1668,7 +1665,7 @@ def page_data_varsel():
             f"**Slik leses tallet:** ved Q = {q_val} m³/s får svømmeren "
             f"**{v_cur:.2f} m/s** i drahjelp over løpsstrekket – strømmen gjør "
             "en jevn del av jobben uansett hvor fort du selv svømmer, og betyr "
-            "relativt sett mest for de bakerste i feltet.  \n"
+            "relativt sett mer jo saktere du svømmer.  \n"
             f"**Løypelengde:** 11,0 km oppmålt langs midtstrømmen, fra "
             f"startpunktet ({FLOTERN_START_LAT:.4f}°N, {FLOTERN_START_LON:.4f}°E, "
             "litt sørvest for Bingsfossen) til Fetsund lenser. Den faktiske "
@@ -1681,14 +1678,7 @@ def page_data_varsel():
             "hovedstrømmen ligger overflaten typisk 10–25 % høyere, mens farten "
             "faller i de brede, stilleflytende partiene mot Nordre Øyeren. Bruk "
             "tallet som et anslag for strekket som helhet, ikke som en lovnad om "
-            "drahjelp på et gitt punkt.  \n"
-            "**Konsistens:** luftlinjen mellom de to koordinatene er 9,74 km, "
-            "så 11,0 km svarer til sinuositet 1,13. De 9,5 km som "
-            "kartavstandene 45,0 − 35,5 gir, ville betydd sinuositet 0,98 – "
-            "altså er det «45,0 km» som er for lite; 35,5 + 11,0 gir 46,5 km "
-            "langs elva. Transporttidene berøres ikke: 9700 er kalibrert mot "
-            "observerte ankomsttider, og 7670 = 6871 × 35,5/31,8 bruker ikke "
-            "45,0 i det hele tatt."
+            "drahjelp på et gitt punkt."
         )
 
     # ── TAB 3: Vind ved Mjøsa ─────────────────────────────────────────────────
