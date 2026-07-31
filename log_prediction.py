@@ -32,7 +32,7 @@ import glommadyppen_core as core
 # Ark-ID og fanenavn er definert ETT sted (glommadyppen_core.py) slik at
 # skriving (her) og lesing (appen, via core.read_prediction_log) aldri kan
 # komme ut av synk.
-REQUIRED_CORE_VERSION = "1.11.3"
+REQUIRED_CORE_VERSION = "1.11.4"
 if getattr(core, "CORE_VERSION", None) != REQUIRED_CORE_VERSION:
     # Feil hardt og tidlig. Skriver vi til arket med en gammel kjerne, blir
     # loggen stille inkonsistent - noen rader med dynamisk κ, andre uten - og
@@ -64,6 +64,11 @@ HEADER = (
        "kappa_source", "forecast_mode", "seiche_rejected_reason"]
     + [f"sigma_h{h}" for h in LOG_HORIZONS_H]
     + [f"delta_vorma_h{h}" for h in LOG_HORIZONS_H]
+    # ── Nytt fra v1.11.4 ─────────────────────────────────────────────────────
+    # Dempningen og den effektive κ logges separat fra κ_episode, slik at en
+    # senere rekalibrering kan skille massebalansen (f) fra transporttapet.
+    + ["transport_attenuation", "kappa_effective", "level_offset",
+       "offset_samples", "offset_span_h", "glomma_temp_now"]
     # ── Nytt fra v1.10 ───────────────────────────────────────────────────────
     # Persentilen logges ved siden av m·h, ikke i stedet for. Absoluttverdien
     # er rådata og må stå urørt; persentilen avhenger av referansefordelingen
@@ -83,10 +88,9 @@ def fetch_inputs():
     vorma_history = core.fetch_nve_data(core.STATION_SVANEFOSS, 1003,
                                         hours_back=core.SEICHE_HISTORY_HOURS,
                                         api_key=nve_key)
-    if vorma_history.empty:
-        vorma_history = core.fetch_nve_data(core.STATION_FUNNEFOSS_TEMP, 1003,
-                                            hours_back=core.SEICHE_HISTORY_HOURS,
-                                            api_key=nve_key)
+    # v1.11.4: fallbacken til Funnefoss er fjernet. Funnefoss (2.410.0) ligger i
+    # GLOMMA, ikke i Vorma, og bærer ikke oppvellingssignalet. Å bruke den som
+    # «Vorma» ga en logg som så normal ut mens kaldpulsen var usynlig.
     primary_df = vorma_history.copy()
     if not primary_df.empty:
         cut = pd.to_datetime(primary_df['time']).max() - pd.Timedelta(hours=168)
@@ -97,13 +101,15 @@ def fetch_inputs():
     ertesekken_q = core.fetch_nve_data(core.STATION_ERTESEKKEN_Q, 1001, hours_back=168, api_key=nve_key)
     # Glomma-vannføring - nødvendig for dynamisk uttynning
     funnefoss_q  = core.fetch_nve_data(core.STATION_FUNNEFOSS_Q, 1001, hours_back=168, api_key=nve_key)
+    # Glomma-temperatur - blandingsskranken (v1.11.4)
+    funnefoss_temp = core.fetch_nve_data(core.STATION_FUNNEFOSS_TEMP, 1003, hours_back=168, api_key=nve_key)
     frost_vind   = core.fetch_frost_wind(hours_back=168)
     weather_mjosa = core.fetch_weather_forecast(core.MJOSA_LAT, core.MJOSA_LON)
     if not weather_mjosa.empty:
         weather_mjosa = core.add_southerly_component(weather_mjosa)
 
     return (primary_df, fetsund_temp, ertesekken_q, funnefoss_q,
-            frost_vind, weather_mjosa, vorma_history)
+            frost_vind, weather_mjosa, vorma_history, funnefoss_temp)
 
 
 def nearest_forecast_row(forecast_df, target_h):
@@ -119,7 +125,7 @@ def nearest_forecast_row(forecast_df, target_h):
 def build_snapshot():
     """Bygger én loggrad (dict) fra nåværende observasjoner + prediksjon."""
     (primary_df, fetsund_temp, ertesekken_q, funnefoss_q,
-     frost_vind, weather_mjosa, vorma_history) = fetch_inputs()
+     frost_vind, weather_mjosa, vorma_history, funnefoss_temp) = fetch_inputs()
 
     if primary_df.empty:
         print("Ingen Vorma-data tilgjengelig - hopper over denne loggingen.", file=sys.stderr)
@@ -161,8 +167,10 @@ def build_snapshot():
 
     forecast_df = core.build_fetsund_forecast(
         primary_df, fetsund_temp, ertesekken_q,
-        glomma_q_df=funnefoss_q, energy_df=energy_df,
+        glomma_q_df=funnefoss_q, glomma_temp_df=funnefoss_temp,
+        energy_df=energy_df,
     )
+    _fa = forecast_df.attrs if forecast_df is not None else {}
     forecast_mode = forecast_df['mode'].iloc[0] if not forecast_df.empty else None
 
     row = {
@@ -194,6 +202,15 @@ def build_snapshot():
         "kappa_source":         kappa_src,
         "forecast_mode":        forecast_mode,
         "seiche_rejected_reason": seiche.get('rejected_reason'),
+        # ── Nytt fra v1.11.4 ─────────────────────────────────────────────────
+        "transport_attenuation": _fa.get('attenuation'),
+        "kappa_effective":      _fa.get('kappa_effective'),
+        "level_offset":         _fa.get('level_offset'),
+        "offset_samples":       _fa.get('offset_samples'),
+        "offset_span_h":        _fa.get('offset_span_h'),
+        "glomma_temp_now":      (round(float(funnefoss_temp['value'].iloc[-1]), 2)
+                                 if (funnefoss_temp is not None
+                                     and not funnefoss_temp.empty) else None),
     }
 
     for h in LOG_HORIZONS_H:
