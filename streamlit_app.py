@@ -78,7 +78,7 @@ st.set_page_config(
 # melding om nøyaktig hva som er ute av synk.
 # ============================================================================
 
-REQUIRED_CORE_VERSION = "1.11.3"
+REQUIRED_CORE_VERSION = "1.11.4"
 
 _REQUIRED_CORE_ATTRS = [
     # v1.7 - dynamisk uttynning og robusthet
@@ -93,6 +93,11 @@ _REQUIRED_CORE_ATTRS = [
     "ENERGY_REF_PCTL", "ENERGY_REF_MH", "energy_percentile",
     "energy_from_percentile", "energy_risk_level", "estimate_energy_scale",
     "WIND_ANOMALY_SLOPE_EFF",
+    # v1.11.4 - transportdempet κ, rolig-tilpasset nivåkorreksjon, blandingsskranke
+    "transport_attenuation", "TAU_REF_HOURS", "TAU_ATTEN_HOURS",
+    "ATTEN_MIN", "ATTEN_MAX", "MIXING_CAP_MARGIN",
+    "OFFSET_WINDOW_MAX_H", "OFFSET_QUIET_MAX_ANOM", "OFFSET_MIN_SAMPLES",
+    "OFFSET_MAX_ABS",
     # v1.11 - strømhastighet og drahjelp på løpsstrekket
     "REACH_FLOTERN_FETSUND_KM", "reach_current_speed", "swim_assist",
     "FLOTERN_START_LAT", "FLOTERN_START_LON",
@@ -133,8 +138,8 @@ def _check_core_version():
     sig_ok = True
     try:
         import inspect
-        sig_ok = 'glomma_q_df' in inspect.signature(
-            _core.build_fetsund_forecast).parameters
+        _params = inspect.signature(_core.build_fetsund_forecast).parameters
+        sig_ok = ('glomma_q_df' in _params) and ('glomma_temp_df' in _params)
     except (AttributeError, ValueError, TypeError):
         sig_ok = False
 
@@ -166,7 +171,7 @@ def _check_core_version():
             language=None)
     st.markdown(
         "Sjekk at nettopp *denne* filen er den du lastet opp. Riktig fil har "
-        "`CORE_VERSION = \"1.11.3\"` på linje 30 og er cirka 1 550 linjer lang. "
+        "`CORE_VERSION = \"1.11.4\"` på linje 30 og er cirka 1 550 linjer lang. "
         "Ligger det flere kopier i repoet, er det stien over som gjelder."
     )
 
@@ -176,7 +181,7 @@ def _check_core_version():
             if not sig_ok:
                 st.markdown(
                     "I tillegg mangler `build_fetsund_forecast()` argumentet "
-                    "`glomma_q_df`."
+                    "`glomma_q_df` eller `glomma_temp_df`."
                 )
     st.stop()
 
@@ -1032,9 +1037,10 @@ def page_prediksjon():
         # serie. Tidligere ble stasjonen hentet to ganger (168 t og 336 t).
         vorma_history = fetch_nve_data(STATION_SVANEFOSS, 1003,
                                        hours_back=SEICHE_HISTORY_HOURS)
-        if vorma_history.empty:
-            vorma_history = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003,
-                                           hours_back=SEICHE_HISTORY_HOURS)
+        # v1.11.4: den gamle fallbacken hentet Funnefoss (2.410.0) som erstatning
+        # for Svanefoss. Funnefoss ligger i GLOMMA, ikke i Vorma, og er 4-5 °C
+        # varmere uten oppvellingssignal. Modellen ville da rapportert «ingen
+        # kaldpuls» stikk i strid med virkeligheten. Bedre å feile åpenlyst.
         primary_df = vorma_history.copy()
         if not primary_df.empty:
             _cut = pd.to_datetime(primary_df['time']).max() - pd.Timedelta(hours=168)
@@ -1045,6 +1051,8 @@ def page_prediksjon():
         ertesekken_q  = fetch_nve_data(STATION_ERTESEKKEN_Q, 1001, hours_back=168)
         # Glomma-vannføring: nødvendig for dynamisk uttynning κ = Q_V/(Q_V+Q_G)
         funnefoss_q   = fetch_nve_data(STATION_FUNNEFOSS_Q,  1001, hours_back=168)
+        # Glomma-temperatur: nødvendig for blandingsskranken (v1.11.4)
+        funnefoss_temp = fetch_nve_data(STATION_FUNNEFOSS_TEMP, 1003, hours_back=168)
         frost_vind    = fetch_frost_wind(hours_back=168)
         weather_mjosa = fetch_weather_forecast(MJOSA_LAT, MJOSA_LON)
         if not weather_mjosa.empty:
@@ -1170,6 +1178,7 @@ def page_prediksjon():
     energy_df   = build_wind_energy_series(frost_vind, weather_mjosa)
     forecast_df = build_fetsund_forecast(primary_df, fetsund_temp, ertesekken_q,
                                          glomma_q_df=funnefoss_q,
+                                         glomma_temp_df=funnefoss_temp,
                                          energy_df=energy_df)
     _mode = forecast_df['mode'].iloc[0] if not forecast_df.empty else None
     if _mode == 'level' and FORECAST_MODE == 'increment':
@@ -1633,7 +1642,7 @@ def page_data_varsel():
         )
         s2.metric("Strømhastighet, km/t", f"{v_cur * 3.6:.2f} km/t")
         s3.metric(
-            f"Max tid Fløter'n {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
+            f"Ren drift {REACH_FLOTERN_FETSUND_KM:.0f} km", f"{drift_h:.1f} t",
             help="Tiden strekket tar uten å svømme i det hele tatt – "
                  "identisk med differansen i transporttid over.",
         )
@@ -2051,7 +2060,7 @@ def main():
             label_visibility="collapsed",
         )
         st.markdown("---")
-        st.caption(f"App 1.11.3 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
+        st.caption(f"App 1.11.4 · kjerne {getattr(_core, 'CORE_VERSION', '?')}")
         st.markdown("""
         **Modell**
         - Fløter'n (start): t = 7670 / Q
