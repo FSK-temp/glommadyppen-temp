@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 # oppstart. Uten sjekken gir en delvis utrulling (ny app + gammel kjerne) bare
 # en sladdet NameError på Streamlit Cloud, som er nesten umulig å feilsøke.
 # Øk versjonen hver gang det legges til navn eller endres funksjonssignaturer.
-CORE_VERSION = "1.11.3"
+CORE_VERSION = "1.11.4"
 
 NVE_BASE_URL    = "https://hydapi.nve.no/api/v1"
 FROST_CLIENT_ID = "582507d2-434f-4578-afbd-919713bb3589"
@@ -238,7 +238,51 @@ RELAX_PERSISTENT      = 0.30    # andel som IKKE forsvinner innen prognosehoriso
 # Nivåkorreksjon: median residual siste døgn. Fanger opp at Fetsunds
 # uforstyrrede nivå ligger noe over Vormas, og at persentilbaselinen driver
 # sakte med sesongen.
-OFFSET_WINDOW_HOURS   = 24
+#
+# v1.11.4: nivåkorreksjonen tilpasses nå BARE på rolige timer. Den gamle
+# varianten tok medianresidualen over de siste 24 timene uansett tilstand.
+# Under en kaldepisode er residualen ikke et NIVÅavvik, men hele FORSTERKNINGS-
+# feilen: modellen ventet κ·A ≈ −4,7 °C mens Fetsund bare falt ~2,5 °C, og
+# differansen ble lagret som et additivt konstantledd. Når anomalien så
+# relakserte mot null etter rebounden, ble konstanten stående igjen som ren
+# varm bias. 31. juli 2026 ga det en prognose på 21,2 °C - varmere enn BEGGE
+# innløpene (Vorma 16,4, Glomma 20,3) og dermed fysisk umulig.
+# Historisk er tilstanden sjelden (o_gammel > 2 °C i 0,23 % av juli-august-
+# timene 2017-2025, alle under pulser dypere enn 10 °C), men den inntreffer
+# nettopp under de dypeste episodene - altså der modellen skal brukes.
+OFFSET_WINDOW_HOURS   = 24     # t – primærvindu
+OFFSET_WINDOW_MAX_H   = 168    # t – hvor langt tilbake det letes etter rolige timer
+OFFSET_QUIET_MAX_ANOM = 1.0    # °C – |A_Vorma| over dette ⇒ timen er ikke «rolig»
+OFFSET_MIN_SAMPLES    = 4      # færre rolige timer ⇒ ingen korreksjon (0,0)
+OFFSET_MAX_ABS        = 1.5    # °C – hard klipping; korreksjonen skal fange
+                               # sesongdrift, ikke forsterkningsfeil
+
+# ── Transportdempning av κ (v1.11.4) ─────────────────────────────────────────
+# κ = f er ren massebalanse og tar ikke hensyn til at kaldpulsen mister
+# amplitude på veien. Realisert respons r = A_Fetsund/(f·A_Vorma), målt på
+# 2 760 timer juli-august 2017-2025 med A_Vorma < −2 °C, avtar systematisk med
+# transporttiden:
+#       τ ≤ 15 t: median r = 1,08 · 15-20 t: 0,99 · 20-25 t: 0,99
+#       25-30 t : 0,97           · 35-45 t: 0,69
+# Log-lineær tilpasning: r = 1,29·exp(−τ/67 t), p = 3·10⁻³⁶ (R² = 0,06 - støyen
+# er stor, retningen er sikker). Fysisk forventet: lengre transitt gir både mer
+# lengdedispersjon og mer varmeutveksling med atmosfæren.
+# Ved medianvannføring (τ ≈ 22 t) er dempningen 1,0 - modellen er uendret der.
+# Ved lav vannføring (31.07.2026: Q_Vorma = 236 m³/s ⇒ τ = 41 t) blir den 0,75.
+TAU_REF_HOURS    = 22.0   # t – historisk median transporttid Svanefoss→Fetsund
+TAU_ATTEN_HOURS  = 67.0   # t – e-foldingstid for amplitudetapet
+ATTEN_MIN        = 0.50
+ATTEN_MAX        = 1.15
+
+# Fysisk skranke fra massebalanse (v1.11.4). Fetsund kan ikke bli varmere enn
+# blandingen av de to innløpene pluss soloppvarming underveis. Empirisk
+# fordeling av Δ = T_Fetsund − [f·T_Svanefoss(t−τ) + (1−f)·T_Funnefoss(t−τ_g)],
+# 15. juli–31. august 2017-2025, n = 7 128 (2021 utelatt - Svanefoss-sensoren
+# var ødelagt fra 27. juli det året):
+#       p50 +0,06 · p90 +1,03 · p95 +1,44 · p99 +2,25 · p99,5 +2,67 · maks +5,09
+# Marginen settes til p99,3. Skranken binder da i under 1 % av timene og er en
+# ren sikkerhetsventil mot grove artefakter, ikke en aktiv modellkomponent.
+MIXING_CAP_MARGIN     = 2.5    # °C
 
 # TESTET OG FORKASTET: å framskrive driften i det uforstyrrede nivået. Median
 # drift er +0,08 °C/døgn i juli og −0,04 i august, men 5.–95. persentil spenner
@@ -775,6 +819,26 @@ def relaxation_factor(hours_ahead):
     fast = (1.0 - RELAX_SLOW_FRACTION - RELAX_PERSISTENT) * np.exp(-t / RELAX_TAU_FAST)
     slow = RELAX_SLOW_FRACTION * np.exp(-t / RELAX_TAU_SLOW)
     return np.clip(fast + slow + RELAX_PERSISTENT, 0.0, 1.0)
+
+
+def transport_attenuation(travel_h):
+    """
+    Amplitudetap for en temperaturanomali på veien Svanefoss → Fetsund, som
+    funksjon av transporttiden.
+
+        a(τ) = exp( −(τ − τ_ref) / τ_att ),  klippet til [ATTEN_MIN, ATTEN_MAX]
+
+    Normalisert slik at a = 1 ved historisk median transporttid (τ_ref = 22 t).
+    Se kommentaren ved TAU_REF_HOURS for datagrunnlaget.
+    """
+    try:
+        th = float(travel_h)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(th) or th <= 0:
+        return 1.0
+    return float(np.clip(np.exp(-(th - TAU_REF_HOURS) / TAU_ATTEN_HOURS),
+                         ATTEN_MIN, ATTEN_MAX))
 
 
 def calculate_travel_time(discharge_df):
@@ -1561,7 +1625,8 @@ def _effective_wind_energy(energy_lookup, now_utc, h_step):
 
 def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
                            glomma_q_df=None, hours_ahead=120, step_h=3,
-                           energy_df=None, mode=None, now=None):
+                           energy_df=None, mode=None, now=None,
+                           glomma_temp_df=None):
     """
     Tidsserie for predikert temperatur ved Fløter'n / Fetsund med
     usikkerhetsintervaller.
@@ -1624,6 +1689,9 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
                                                  mode='increment')
     kappa_lvl, _, _             = dilution_kappa(discharge_df, glomma_q_df,
                                                  mode='episode')
+    # v1.11.4: κ dempes med transporttiden. Ved medianvannføring er atten = 1,0.
+    atten     = transport_attenuation(travel_h)
+    kappa_eff = kappa_lvl * atten
 
     sv_last_t   = sv.index.max()
     sv_last_val = float(sv.loc[sv_last_t])
@@ -1698,18 +1766,55 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
         anchor = fetsund_baseline
 
     # ── Nivåkorreksjon for anomaliformen ────────────────────────────────────
-    offset = 0.0
+    # Tilpasses BARE på rolige timer (|A_Vorma| ≤ OFFSET_QUIET_MAX_ANOM). Under
+    # en kaldepisode er residualen en forsterkningsfeil, ikke et nivåavvik, og
+    # å lagre den som et additivt konstantledd gir varm bias etter rebounden.
+    # Vinduet utvides bakover til det finnes nok rolige timer; finnes de ikke,
+    # brukes ingen korreksjon. Resultatet klippes hardt.
+    offset          = 0.0
+    offset_samples  = 0
+    offset_span_h   = None
     if use_mode == 'anomaly':
-        resid = []
+        quiet = []
         fe_ud_series = undisturbed_baseline(fe_h)
-        for s_t in pd.date_range(fe_last_t - pd.Timedelta(hours=OFFSET_WINDOW_HOURS),
-                                 fe_last_t, freq='3h'):
-            if s_t in fe_h.index and pd.notna(fe_ud_series.get(s_t, np.nan)):
-                a_src, _ = _anom_at(s_t - pd.Timedelta(hours=travel_h))
-                resid.append(float(fe_h.at[s_t]) - float(fe_ud_series.at[s_t])
-                             - kappa_lvl * a_src)
-        if resid:
-            offset = float(np.median(resid))
+        for back_h in range(0, int(OFFSET_WINDOW_MAX_H) + 1, 3):
+            s_t = fe_last_t - pd.Timedelta(hours=back_h)
+            if s_t not in fe_h.index:
+                continue
+            ud = fe_ud_series.get(s_t, np.nan)
+            if not pd.notna(ud):
+                continue
+            a_src, _ = _anom_at(s_t - pd.Timedelta(hours=travel_h))
+            if abs(a_src) > OFFSET_QUIET_MAX_ANOM:
+                continue
+            quiet.append(float(fe_h.at[s_t]) - float(ud) - kappa_eff * a_src)
+            offset_span_h = back_h
+            if back_h >= OFFSET_WINDOW_HOURS and len(quiet) >= OFFSET_MIN_SAMPLES:
+                break
+        offset_samples = len(quiet)
+        if offset_samples >= OFFSET_MIN_SAMPLES:
+            offset = float(np.clip(np.median(quiet),
+                                   -OFFSET_MAX_ABS, OFFSET_MAX_ABS))
+
+    # ── Glomma-temperatur (Funnefoss) til blandingsskranken ─────────────────
+    gl_h = _hourly_series(glomma_temp_df)
+    if gl_h is not None and gl_h.empty:
+        gl_h = None
+
+    def _glomma_at(t):
+        """T_Glomma ved Funnefoss. Utenfor serien: persistens av siste måling.
+        Glomma-temperaturen endrer seg langsomt, og skranken har uansett
+        MIXING_CAP_MARGIN å gå på."""
+        if gl_h is None:
+            return None
+        t = pd.Timestamp(t).as_unit('ns')
+        if t < gl_h.index.min():
+            v = gl_h.iloc[0]
+        elif t > gl_h.index.max():
+            v = gl_h.iloc[-1]
+        else:
+            v = gl_h.asof(t)
+        return float(v) if pd.notna(v) else None
 
     # Referansepunkt for inkrementformen
     sv_ref, _ = _vorma_at(now_utc - pd.Timedelta(hours=travel_h))
@@ -1732,7 +1837,7 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
 
         if use_mode == 'anomaly':
             a_src, is_extrap = _anom_at(t_src)
-            k_used  = kappa_lvl
+            k_used  = kappa_eff
             level   = fe_undist_now
             model   = level + k_used * a_src + offset
             # Ved h = 0 VET vi temperaturen; da skal prognosen være målingen.
@@ -1842,6 +1947,32 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             hi68 = max(hi68, pred)
             hi95 = max(hi95, hi68)
 
+        # ── Blandingsskranke (v1.11.4) ──────────────────────────────────────
+        # Fetsund er et blandingspunkt: temperaturen kan ikke overstige
+        #     f·T_Vorma + (1−f)·T_Glomma + margin
+        # Ren massebalanse, derfor kappa_lvl (= f) og ikke den dempede κ.
+        # Marginen dekker soloppvarming på de 45 km ned til Fetsund; se
+        # kommentaren ved MIXING_CAP_MARGIN. Skranken virker gjennom hele
+        # horisonten, også utenfor datahorisonten, der begge innløp holdes
+        # på persistens.
+        # Skranken gjelder BARE innenfor datahorisonten, av samme grunn som
+        # den uforstyrrede skranken over: utenfor horisonten er begge innløp
+        # ekstrapolert, og et tak bygget på gjettede innløpstemperaturer er
+        # verre enn intet tak.
+        mix_cap = None
+        t_v_src, v_extrap = _vorma_at(t_src)
+        t_g_src           = _glomma_at(t_src)
+        if (not v_extrap and t_g_src is not None and np.isfinite(t_v_src)
+                and np.isfinite(kappa_lvl)):
+            mix_cap = float(kappa_lvl * t_v_src + (1.0 - kappa_lvl) * t_g_src
+                            + MIXING_CAP_MARGIN)
+            if pred > mix_cap:
+                pred = mix_cap
+            # Båndet holdes velformet: taket skal aldri presse øvre grense
+            # under selve punktestimatet.
+            hi68 = min(hi68, max(mix_cap, pred))
+            hi95 = min(hi95, max(mix_cap, hi68))
+
         rows.append({
             'time':            t_fut,
             'predicted':       round(pred, 2),
@@ -1856,6 +1987,8 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
             'is_extrapolated': bool(is_extrap),
             'wind_E_forecast': e_fc,
             'wind_risk_level': risk_level,
+            'mixing_cap':      (round(float(mix_cap), 2)
+                                if mix_cap is not None else None),
         })
 
     out = pd.DataFrame(rows)
@@ -1864,7 +1997,12 @@ def build_fetsund_forecast(vorma_df, fetsund_df, discharge_df,
     out.attrs['undisturbed_level'] = (round(fe_undist_now, 2)
                                       if fe_undist_now is not None else None)
     out.attrs['travel_hours']    = travel_h
+    out.attrs['attenuation']     = round(float(atten), 3)
+    out.attrs['kappa_effective'] = round(float(kappa_eff), 3)
+    out.attrs['level_offset']    = round(float(offset), 3)
+    out.attrs['offset_samples']  = int(offset_samples)
+    out.attrs['offset_span_h']   = offset_span_h
     return out
 
 
-__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FLOTERN_START_LAT', 'FLOTERN_START_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'REACH_FLOTERN_FETSUND_KM', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'ENERGY_REF_PCTL', 'ENERGY_REF_MH', 'ENERGY_SOURCE_SCALE', 'ENERGY_PCTL_WARN', 'ENERGY_PCTL_ALARM', 'energy_from_percentile', 'energy_percentile', 'energy_risk_level', 'estimate_energy_scale', 'WIND_ANOMALY_SLOPE_EFF', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'reach_current_speed', 'swim_assist', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
+__all__ = ['CORE_VERSION', 'NVE_BASE_URL', 'FROST_CLIENT_ID', 'FROST_BASE_URL', 'STATION_SVANEFOSS', 'STATION_FUNNEFOSS_TEMP', 'STATION_ERTESEKKEN_Q', 'STATION_BLAKER', 'STATION_FUNNEFOSS_Q', 'STATION_FETSUND', 'FROST_STATION_KISE', 'MJOSA_LAT', 'MJOSA_LON', 'BINGSFOSSEN_LAT', 'BINGSFOSSEN_LON', 'FLOTERN_START_LAT', 'FLOTERN_START_LON', 'FETSUND_LAT', 'FETSUND_LON', 'TRANSPORT_COEFF', 'TRANSPORT_COEFF_BLA', 'TRANSPORT_COEFF_FLOTERN', 'REACH_FLOTERN_FETSUND_KM', 'FALLBACK_DISCHARGE', 'TEMPERATURE_SURVIVAL', 'MIXING_FRACTION_FALLBACK', 'DILUTION_ETA_EPISODE', 'DILUTION_ETA_INCREMENT', 'DISCHARGE_MIN_VALID', 'DISCHARGE_MAX_VALID', 'FALLBACK_DISCHARGE_GLOMMA', 'SIGMA_BASE', 'SIGMA_PER_DELTA', 'SIGMA_FLOOR', 'MODEL_SIGMA_ASYMPTOTE', 'SIGMA_EXTRAP_TAU', 'ANOMALY_SIGMA_EXTRAP_COLD', 'ANOMALY_SIGMA_EXTRAP_WARM', 'ANOMALY_SIGMA_BASE', 'ANOMALY_SIGMA_RAMP', 'UNDISTURBED_CAP_MARGIN', 'FORECAST_MODE', 'BASELINE_WINDOW_HOURS', 'BASELINE_QUANTILE', 'RELAX_TAU_FAST', 'RELAX_TAU_SLOW', 'RELAX_SLOW_FRACTION', 'RELAX_PERSISTENT', 'OFFSET_WINDOW_HOURS', 'OFFSET_WINDOW_MAX_H', 'OFFSET_QUIET_MAX_ANOM', 'OFFSET_MIN_SAMPLES', 'OFFSET_MAX_ABS', 'TAU_REF_HOURS', 'TAU_ATTEN_HOURS', 'ATTEN_MIN', 'ATTEN_MAX', 'MIXING_CAP_MARGIN', 'transport_attenuation', 'GAIN_REL_68_LOW', 'GAIN_REL_68_HIGH', 'GAIN_REL_95_LOW', 'GAIN_REL_95_HIGH', 'VORMA_BASELINE_HOURS', 'VORMA_RELAX_HOURS', 'MODEL_SIGMA', 'MODEL_SIGMA_DATA', 'TEMP_HIST_LOWER', 'TEMP_HIST_UPPER', 'WIND_SECTOR_MIN', 'WIND_SECTOR_MAX', 'WIND_WINDOW_HOURS', 'WIND_LEAD_HOURS', 'CRITICAL_WIND_SPEED', 'ENERGY_THRESHOLD', 'ENERGY_WARN', 'ENERGY_REF_PCTL', 'ENERGY_REF_MH', 'ENERGY_SOURCE_SCALE', 'ENERGY_PCTL_WARN', 'ENERGY_PCTL_ALARM', 'energy_from_percentile', 'energy_percentile', 'energy_risk_level', 'estimate_energy_scale', 'WIND_ANOMALY_SLOPE_EFF', 'WIND_RISK_HORIZON_HOURS', 'WIND_ANOMALY_SLOPE', 'WIND_ANOMALY_E_TYPISK', 'WIND_SIGMA_MULT_WARN', 'WIND_SIGMA_MULT_ALARM', 'SEICHE_WINDOW_START_DAYS', 'SEICHE_WINDOW_END_DAYS', 'SEICHE_COLD_THRESHOLD', 'SEICHE_ANOMALY_MIN', 'SEICHE_REBOUND_MIN', 'SEICHE_HISTORY_HOURS', 'OW_ABORT', 'OW_WETSUIT_REQUIRED', 'OW_WETSUIT_STRONG', 'OW_WETSUIT_OPTIONAL', 'OW_TOO_WARM', 'EVENT_YEAR', 'EVENT_MONTH', 'EVENT_DAY_OF_WEEK', 'fetch_nve_data', 'fetch_frost_wind', 'fetch_weather_forecast', 'add_southerly_component', 'detect_temperature_drop', 'calculate_travel_time', 'reach_current_speed', 'swim_assist', 'detect_seiche_risk', 'predict_fetsund_temperature', 'assess_risk_open_water', 'calculate_event_date', 'wind_rose_label', 'safe_discharge', 'mixing_fraction', 'dilution_kappa', 'undisturbed_baseline', 'relaxation_factor', 'build_wind_energy_series', 'build_fetsund_forecast', 'read_prediction_log', 'evaluate_prediction_log', 'summarize_prediction_skill', 'prediction_history_series', 'EVAL_HORIZONS', 'PREDICTION_LOG_SHEET_ID', 'PREDICTION_LOG_WORKSHEET']
